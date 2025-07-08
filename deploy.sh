@@ -36,8 +36,8 @@ if [ $# -eq 0 ]; then
     exit 1
 fi
 
-GITHUB_USERNAME=$1
-REPO_NAME="dual-account-grid-strategy"
+GITHUB_USERNAME="fm0668"
+REPO_NAME="GirdBot"
 
 print_info "开始部署双账户对冲网格策略..."
 print_info "GitHub用户名: $GITHUB_USERNAME"

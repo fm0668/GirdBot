@@ -19,8 +19,8 @@ if "%1"=="" (
     exit /b 1
 )
 
-set "GITHUB_USERNAME=%1"
-set "REPO_NAME=dual-account-grid-strategy"
+set "GITHUB_USERNAME=fm0668"
+set "REPO_NAME=GirdBot"
 
 echo %BLUE%[INFO]%NC% 开始部署双账户对冲网格策略...
 echo %BLUE%[INFO]%NC% GitHub用户名: %GITHUB_USERNAME%
