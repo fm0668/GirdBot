@@ -1,0 +1,68 @@
+# 环境变量和敏感信息
+.env
+*.env.local
+*.env.production
+
+# 日志文件
+logs/*.log
+logs/*.txt
+
+# Python 相关
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# IDE 相关
+.vscode/settings.json
+.vscode/launch.json
+.idea/
+*.swp
+*.swo
+*~
+
+# 操作系统相关
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# 参考资料和说明文档 (按要求排除)
+参考资料/
+
+# 排除生成的文档（保留用户创建的README.md）
+VERSION.md
+DELIVERY.md
+DEPLOYMENT.md
+GIT_PUSH_GUIDE.md
+README_GITHUB.md
+README_FOR_GITHUB.md
+DEPLOY_CHECKLIST.md
+QUICK_DEPLOY_GUIDE.md
+READY_TO_DEPLOY.md
+
+# 测试和临时文件
+test_*.py
+temp/
+tmp/
+*.tmp
+*.bak
