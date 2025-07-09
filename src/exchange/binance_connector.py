@@ -70,12 +70,18 @@ class BinanceConnector:
             )
             
             # 测试连接
-            await self.ping()
-            self.connected = True
-            logger.info("币安API连接建立成功")
+            ping_success = await self.ping()
+            if ping_success:
+                self.connected = True
+                logger.info("币安API连接建立成功")
+            else:
+                raise Exception("Ping测试失败")
             
         except Exception as e:
             logger.error(f"建立币安API连接失败: {e}")
+            if self.session:
+                await self.session.close()
+                self.session = None
             raise
             
     async def close(self):
@@ -140,14 +146,35 @@ class BinanceConnector:
             logger.error(f"HTTP请求异常: {e}")
             raise
             
-    async def ping(self) -> bool:
-        """测试连接"""
+    async def test_connectivity(self) -> bool:
+        """测试连接状态"""
         try:
-            await self._request('GET', '/fapi/v1/ping')
-            self.last_ping_time = time.time()
+            await self.ping()
             return True
         except Exception as e:
-            logger.error(f"ping失败: {e}")
+            logger.error(f"连接测试失败: {e}")
+            return False
+    
+    async def ping(self) -> bool:
+        """Ping服务器"""
+        try:
+            endpoint = "/fapi/v1/ping"
+            
+            if not self.session:
+                logger.error("Session未建立，无法Ping")
+                return False
+            
+            async with self.session.get(f"{self.base_url}{endpoint}") as response:
+                if response.status == 200:
+                    self.last_ping_time = time.time()
+                    logger.info("Ping成功")
+                    return True
+                else:
+                    logger.error(f"Ping失败: HTTP {response.status}")
+                    return False
+                    
+        except Exception as e:
+            logger.error(f"Ping异常: {e}")
             return False
             
     async def get_server_time(self) -> int:
@@ -175,11 +202,17 @@ class BinanceConnector:
     async def get_account_info(self) -> Dict[str, Any]:
         """获取账户信息"""
         try:
+            logger.info(f"获取账户信息 - 连接状态: {self.connected}")
+            if not self.connected:
+                logger.error("账户未连接，无法获取账户信息")
+                return None
+            
             data = await self._request('GET', '/fapi/v3/account', signed=True)
+            logger.info(f"成功获取账户信息: {data.get('totalWalletBalance', 'N/A')}")
             return data
         except Exception as e:
             logger.error(f"获取账户信息失败: {e}")
-            raise
+            return None
             
     async def get_balance(self) -> List[Dict[str, Any]]:
         """获取余额信息"""
@@ -240,15 +273,38 @@ class BinanceConnector:
                          position_side: str = None, **kwargs) -> Dict[str, Any]:
         """下单"""
         try:
+            # 导入精度助手
+            from ..core.precision_helper import precision_helper
+            
+            # 获取交易对信息
+            symbol_info = await self.get_symbol_info(symbol)
+            if not symbol_info:
+                raise Exception(f"无法获取交易对信息: {symbol}")
+            
+            # 调整价格和数量精度
+            adjusted_price = price
+            adjusted_quantity = quantity
+            
+            if price:
+                adjusted_price = precision_helper.round_price(price, symbol_info)
+            
+            adjusted_quantity = precision_helper.round_quantity(quantity, symbol_info)
+            
+            # 验证订单
+            validation = precision_helper.validate_order(adjusted_price or Decimal('0'), adjusted_quantity, symbol_info)
+            
+            if validation['errors']:
+                logger.info(f"订单调整: {validation['errors']}")
+            
             params = {
                 'symbol': symbol,
                 'side': side,
                 'type': order_type,
-                'quantity': str(quantity)
+                'quantity': str(validation['adjusted_quantity'])
             }
             
-            if price:
-                params['price'] = str(price)
+            if adjusted_price:
+                params['price'] = str(validation['adjusted_price'])
                 
             if position_side:
                 params['positionSide'] = position_side
@@ -292,16 +348,29 @@ class BinanceConnector:
             logger.error(f"撤销所有订单失败: {e}")
             raise
             
-    async def get_ticker_price(self, symbol: str) -> Decimal:
-        """获取最新价格"""
+    async def get_symbol_info(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """获取交易对信息"""
+        try:
+            exchange_info = await self.get_exchange_info()
+            symbols = exchange_info.get('symbols', [])
+            
+            for symbol_info in symbols:
+                if symbol_info.get('symbol') == symbol:
+                    return symbol_info
+            return None
+        except Exception as e:
+            logger.error(f"获取交易对信息失败: {e}")
+            return None
+            
+    async def get_ticker_price(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """获取ticker价格"""
         try:
             params = {'symbol': symbol}
             data = await self._request('GET', '/fapi/v1/ticker/price', params)
-            return Decimal(data['price'])
-            
+            return data
         except Exception as e:
-            logger.error(f"获取价格失败: {e}")
-            raise
+            logger.error(f"获取ticker价格失败: {e}")
+            return None
             
     async def get_klines(self, symbol: str, interval: str, limit: int = 500) -> List[List]:
         """获取K线数据"""
@@ -322,14 +391,27 @@ class BinanceConnector:
     async def set_position_mode(self, dual_side: bool) -> Dict[str, Any]:
         """设置持仓模式"""
         try:
+            # 先检查当前的持仓模式
+            current_mode = await self.get_position_mode()
+            
+            # 如果当前模式已经是目标模式，直接返回
+            if current_mode == dual_side:
+                logger.info(f"持仓模式已经是目标模式: 双向={dual_side}")
+                return {"msg": "Position mode already set"}
+            
             params = {'dualSidePosition': str(dual_side).lower()}
             data = await self._request('POST', '/fapi/v1/positionSide/dual', params, signed=True)
             logger.info(f"设置持仓模式成功: 双向={dual_side}")
             return data
             
         except Exception as e:
-            logger.error(f"设置持仓模式失败: {e}")
-            raise
+            error_msg = str(e)
+            if "No need to change position side" in error_msg:
+                logger.info(f"持仓模式无需修改: 双向={dual_side}")
+                return {"msg": "Position mode already set"}
+            else:
+                logger.error(f"设置持仓模式失败: {e}")
+                raise
             
     async def get_position_mode(self) -> bool:
         """获取持仓模式"""
@@ -357,6 +439,10 @@ class BinanceConnector:
             logger.error(f"设置杠杆失败: {e}")
             raise
             
+    async def change_leverage(self, symbol: str, leverage: int) -> Dict[str, Any]:
+        """修改杠杆倍数 (set_leverage的别名)"""
+        return await self.set_leverage(symbol, leverage)
+    
     async def get_leverage_brackets(self, symbol: str = None) -> List[Dict[str, Any]]:
         """获取杠杆分层规则"""
         try:
@@ -370,3 +456,7 @@ class BinanceConnector:
         except Exception as e:
             logger.error(f"获取杠杆分层规则失败: {e}")
             raise
+    
+    async def get_ticker(self, symbol: str) -> Dict[str, Any]:
+        """获取交易对最新价格 (get_ticker_price的别名)"""
+        return await self.get_ticker_price(symbol)

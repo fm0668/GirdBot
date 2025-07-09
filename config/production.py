@@ -11,12 +11,12 @@ class ProductionConfig(BaseConfig):
         super().__init__()
         
         # 生产环境特定配置
-        self.trading.max_open_orders = 4
-        self.trading.atr_multiplier = Decimal("1.0")
+        self.trading.max_open_orders = 2  # 减少同时挂单数
+        self.trading.atr_multiplier = Decimal("0.26")
         self.trading.leverage_safety_factor = Decimal("0.8")
         
         # 更严格的风险控制
-        self.risk.max_position_value = Decimal("50000")
+        self.risk.max_position_value = Decimal("100")  # 减少每格金额
         self.risk.balance_diff_threshold = Decimal("500")
         
         # 生产环境日志

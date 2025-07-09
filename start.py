@@ -6,6 +6,10 @@
 import os
 import sys
 from pathlib import Path
+from dotenv import load_dotenv
+
+# 加载环境变量
+load_dotenv()
 
 def check_environment():
     """检查环境变量"""

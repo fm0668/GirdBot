@@ -1,5 +1,6 @@
 """
-网格策略主程序入口
+网格策略主程序入口 - 重构版本
+集成新的连接器和异常处理机制
 """
 
 import asyncio
@@ -9,16 +10,22 @@ import signal
 import sys
 from pathlib import Path
 from typing import Optional
+from decimal import Decimal
+from dotenv import load_dotenv
 
 # 添加项目根目录到Python路径
 project_root = Path(__file__).parent
 sys.path.insert(0, str(project_root))
+
+# 加载环境变量
+load_dotenv(project_root / '.env')
 
 from config.production import ProductionConfig
 from src.core.dual_account_manager import DualAccountManager
 from src.core.grid_strategy import GridStrategy
 from src.core.monitoring import MonitoringSystem, LoggingSystem
 from src.core.data_structures import StrategyConfig
+from src.exchange.exceptions import GirdBotException, ErrorHandler
 
 
 class GridStrategyApp:
@@ -57,9 +64,21 @@ class GridStrategyApp:
             self.logger.info("应用程序开始初始化")
             
             # 初始化双账户管理器
+            long_account_config = {
+                "api_key": self.config.api_long.api_key,
+                "api_secret": self.config.api_long.api_secret,
+                "testnet": self.config.api_long.testnet
+            }
+            
+            short_account_config = {
+                "api_key": self.config.api_short.api_key,
+                "api_secret": self.config.api_short.api_secret,
+                "testnet": self.config.api_short.testnet
+            }
+            
             self.dual_manager = DualAccountManager(
-                long_config=self.config.long_account,
-                short_config=self.config.short_account
+                long_config=long_account_config,
+                short_config=short_account_config
             )
             
             if not await self.dual_manager.initialize():
@@ -68,16 +87,22 @@ class GridStrategyApp:
             
             # 创建策略配置
             strategy_config = StrategyConfig(
-                symbol=self.config.trading["symbol"],
-                leverage=self.config.trading["leverage"],
-                max_open_orders=self.config.trading["max_open_orders"],
-                position_size_ratio=self.config.trading["position_size_ratio"],
-                atr_period=self.config.risk["atr_period"],
-                atr_multiplier=self.config.risk["atr_multiplier"],
-                atr_period_timeframe=self.config.risk["atr_period_timeframe"],
-                grid_spacing_ratio=self.config.risk["grid_spacing_ratio"],
-                monitor_interval=self.config.system["monitor_interval"],
-                order_check_interval=self.config.system["order_check_interval"]
+                symbol=self.config.trading.symbol,
+                base_investment=Decimal("100"),  # 降低基础投资金额
+                max_investment=Decimal("500"),   # 降低最大投资金额
+                grid_levels=self.config.trading.max_open_orders,
+                grid_spacing_percent=Decimal(str(self.config.trading.grid_spacing_multiplier)),
+                max_open_orders=self.config.trading.max_open_orders,
+                max_drawdown_percent=Decimal("0.20"),
+                position_size_percent=Decimal("0.05"),  # 降低仓位大小
+                position_size_ratio=Decimal("0.05"),    # 降低仓位比例
+                atr_period=self.config.trading.atr_period,
+                atr_period_timeframe="1h",
+                atr_multiplier=Decimal(str(self.config.trading.atr_multiplier)),
+                leverage=Decimal(str(self.config.trading.leverage)),
+                monitor_interval=5,
+                long_account_enabled=True,
+                short_account_enabled=True
             )
             
             # 初始化策略
@@ -87,13 +112,24 @@ class GridStrategyApp:
                 return False
             
             # 初始化监控系统
-            self.monitoring = MonitoringSystem(self.config.monitoring)
+            from dataclasses import asdict
+            self.monitoring = MonitoringSystem(asdict(self.config.monitoring))
             
             self.logger.info("应用程序初始化成功")
             print("✅ 初始化完成")
             return True
             
+        except GirdBotException as e:
+            ErrorHandler.log_error(e, "应用程序初始化")
+            if self.logger:
+                self.logger.error(f"应用程序初始化失败: {e}")
+            else:
+                print(f"❌ 初始化失败: {e}")
+            return False
         except Exception as e:
+            # 转换为GirdBot异常
+            girdbot_error = ErrorHandler.handle_binance_error(e, "应用程序初始化")
+            ErrorHandler.log_error(girdbot_error)
             if self.logger:
                 self.logger.error(f"应用程序初始化失败: {e}")
             else:
@@ -106,11 +142,21 @@ class GridStrategyApp:
         log_dir = Path("logs")
         log_dir.mkdir(exist_ok=True)
         
+        # 将配置对象转换为字典
+        logging_config = {
+            "level": self.config.system.log_level,
+            "console": True,
+            "file_enabled": True,
+            "file_path": f"{self.config.system.log_dir}/grid_strategy.log",
+            "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+            "date_format": "%Y-%m-%d %H:%M:%S"
+        }
+        
         # 设置主日志器
-        self.logger = LoggingSystem.setup_logging(self.config.logging)
+        self.logger = LoggingSystem.setup_logging(logging_config)
         
         # 设置交易日志器
-        self.trade_logger = LoggingSystem.create_trade_logger(self.config.logging)
+        self.trade_logger = LoggingSystem.create_trade_logger(logging_config)
     
     async def start(self) -> bool:
         """
@@ -124,8 +170,8 @@ class GridStrategyApp:
             print("正在启动策略...")
             
             # 检查双账户状态
-            health = await self.dual_manager.health_check()
-            if not health["is_healthy"]:
+            health = await self.dual_manager.health_check(self.config.trading.symbol)
+            if not health.get("long_account", {}).get("is_healthy", False) or not health.get("short_account", {}).get("is_healthy", False):
                 self.logger.error(f"双账户健康检查失败: {health}")
                 print("❌ 双账户状态异常，无法启动策略")
                 return False
@@ -148,7 +194,14 @@ class GridStrategyApp:
             
             return True
             
+        except GirdBotException as e:
+            ErrorHandler.log_error(e, "策略启动")
+            self.logger.error(f"启动策略失败: {e}")
+            print(f"❌ 启动失败: {e}")
+            return False
         except Exception as e:
+            girdbot_error = ErrorHandler.handle_binance_error(e, "策略启动")
+            ErrorHandler.log_error(girdbot_error)
             self.logger.error(f"启动策略失败: {e}")
             print(f"❌ 启动失败: {e}")
             return False
@@ -170,14 +223,19 @@ class GridStrategyApp:
             print(f"活跃网格数: {status['active_grids']}")
             
             print("\n=== 账户状态 ===")
-            print(f"长账户余额: {balance_info['long_balance']:.2f} USDT")
-            print(f"短账户余额: {balance_info['short_balance']:.2f} USDT")
+            print(f"长账户余额: {balance_info['long_balance']:.2f} USDC")
+            print(f"短账户余额: {balance_info['short_balance']:.2f} USDC")
             print(f"资金对齐: {'✅' if balance_info['is_aligned'] else '❌'}")
-            print(f"统一保证金: {balance_info['min_balance']:.2f} USDT")
+            print(f"统一保证金: {balance_info['min_balance']:.2f} USDC")
             
             print("\n策略正在运行，按 Ctrl+C 停止...")
             
+        except GirdBotException as e:
+            ErrorHandler.log_error(e, "显示启动信息")
+            self.logger.error(f"显示启动信息失败: {e}")
         except Exception as e:
+            girdbot_error = ErrorHandler.handle_binance_error(e, "显示启动信息")
+            ErrorHandler.log_error(girdbot_error)
             self.logger.error(f"显示启动信息失败: {e}")
     
     async def run(self):
@@ -213,13 +271,24 @@ class GridStrategyApp:
                     except asyncio.TimeoutError:
                         continue  # 继续循环
                         
+                except GirdBotException as e:
+                    ErrorHandler.log_error(e, "主循环")
+                    self.logger.error(f"主循环异常: {e}")
+                    await asyncio.sleep(10)
                 except Exception as e:
+                    girdbot_error = ErrorHandler.handle_binance_error(e, "主循环")
+                    ErrorHandler.log_error(girdbot_error)
                     self.logger.error(f"主循环异常: {e}")
                     await asyncio.sleep(10)
             
             self.logger.info("主循环结束")
             
+        except GirdBotException as e:
+            ErrorHandler.log_error(e, "运行主循环")
+            self.logger.error(f"运行主循环失败: {e}")
         except Exception as e:
+            girdbot_error = ErrorHandler.handle_binance_error(e, "运行主循环")
+            ErrorHandler.log_error(girdbot_error)
             self.logger.error(f"运行主循环失败: {e}")
         finally:
             await self.shutdown()
@@ -255,13 +324,24 @@ class GridStrategyApp:
                 self.monitoring.stop_monitoring()
                 self.logger.info("监控已停止")
             
+            # 关闭双账户连接
+            if self.dual_manager:
+                await self.dual_manager.close()
+                self.logger.info("双账户连接已关闭")
+            
             # 显示最终统计
             await self._show_final_stats()
             
             self.logger.info("应用程序已安全关闭")
             print("✅ 策略已安全停止")
             
+        except GirdBotException as e:
+            ErrorHandler.log_error(e, "关闭应用程序")
+            self.logger.error(f"关闭应用程序失败: {e}")
+            print(f"❌ 关闭过程中出现错误: {e}")
         except Exception as e:
+            girdbot_error = ErrorHandler.handle_binance_error(e, "关闭应用程序")
+            ErrorHandler.log_error(girdbot_error)
             self.logger.error(f"关闭应用程序失败: {e}")
             print(f"❌ 关闭过程中出现错误: {e}")
     
@@ -280,7 +360,12 @@ class GridStrategyApp:
             print(f"总盈亏: {status['total_profit']:.6f}")
             print(f"胜率: {float(performance.win_rate):.2%}")
             
+        except GirdBotException as e:
+            ErrorHandler.log_error(e, "显示最终统计")
+            self.logger.error(f"显示最终统计失败: {e}")
         except Exception as e:
+            girdbot_error = ErrorHandler.handle_binance_error(e, "显示最终统计")
+            ErrorHandler.log_error(girdbot_error)
             self.logger.error(f"显示最终统计失败: {e}")
 
 
@@ -292,11 +377,13 @@ async def main():
         # 初始化
         if not await app.initialize():
             print("初始化失败，程序退出")
+            await app.shutdown()  # 确保清理
             return 1
         
         # 启动
         if not await app.start():
             print("启动失败，程序退出")
+            await app.shutdown()  # 确保清理
             return 1
         
         # 运行
@@ -304,11 +391,24 @@ async def main():
         
         return 0
         
-    except Exception as e:
+    except GirdBotException as e:
+        ErrorHandler.log_error(e, "主函数")
         if app.logger:
             app.logger.error(f"程序异常退出: {e}")
         print(f"程序异常退出: {e}")
+        await app.shutdown()  # 确保清理
         return 1
+    except Exception as e:
+        girdbot_error = ErrorHandler.handle_binance_error(e, "主函数")
+        ErrorHandler.log_error(girdbot_error)
+        if app.logger:
+            app.logger.error(f"程序异常退出: {e}")
+        print(f"程序异常退出: {e}")
+        await app.shutdown()  # 确保清理
+        return 1
+    finally:
+        # 无论如何都要调用清理
+        await app.shutdown()
 
 
 if __name__ == "__main__":

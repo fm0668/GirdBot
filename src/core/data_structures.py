@@ -24,6 +24,7 @@ class PositionSide(Enum):
 class StrategyStatus(Enum):
     """策略状态枚举"""
     INITIALIZING = "INITIALIZING"
+    INITIALIZED = "INITIALIZED"
     RUNNING = "RUNNING"
     STOPPING = "STOPPING"
     STOPPED = "STOPPED"
@@ -38,11 +39,18 @@ class GridLevel:
     side: PositionSide = PositionSide.LONG
     account_type: str = "long_account"  # "long_account" 或 "short_account"
     
+    # 网格层级
+    level: int = 0  # 网格层级编号
+    
     # 订单状态
     open_order_id: Optional[str] = None
     close_order_id: Optional[str] = None
     open_order_status: OrderStatus = OrderStatus.NOT_ACTIVE
     close_order_status: OrderStatus = OrderStatus.NOT_ACTIVE
+    
+    # 网格状态
+    is_active: bool = True  # 是否激活
+    order_id: Optional[str] = None  # 订单ID
     
     # 成交信息
     filled_quantity: Decimal = Decimal("0")
@@ -121,6 +129,11 @@ class AccountInfo:
     api_connected: bool = False
     ws_connected: bool = False
     last_update_time: float = field(default_factory=time.time)
+    
+    @property
+    def total_balance(self) -> Decimal:
+        """总余额（包含未实现盈亏）"""
+        return self.balance + self.unrealized_pnl
     
     def __post_init__(self):
         """初始化后处理"""
@@ -205,3 +218,130 @@ class PerformanceMetrics:
             return float('inf') if total_wins > 0 else 0.0
         
         return total_wins / total_losses
+
+@dataclass
+@dataclass
+class StrategyConfig:
+    """策略配置数据结构"""
+    strategy_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    
+    # 交易配置
+    symbol: str = "BTCUSDT"
+    base_investment: Decimal = Decimal("1000")  # 基础投资金额
+    max_investment: Decimal = Decimal("10000")  # 最大投资金额
+    
+    # 网格配置
+    grid_levels: int = 10  # 网格层数
+    grid_spacing_percent: Decimal = Decimal("0.01")  # 网格间距百分比
+    max_open_orders: int = 6  # 最大同时挂单数
+    
+    # 风险控制
+    max_drawdown_percent: Decimal = Decimal("0.20")  # 最大回撤百分比
+    position_size_percent: Decimal = Decimal("0.10")  # 每次开仓资金百分比
+    position_size_ratio: Decimal = Decimal("0.10")  # 头寸规模比例
+    
+    # ATR配置
+    atr_period: int = 14
+    atr_period_timeframe: str = "1h"  # ATR时间周期
+    atr_multiplier: Decimal = Decimal("2.0")
+    
+    # 杠杆配置
+    leverage: Decimal = Decimal("1.0")  # 杠杆倍数
+    
+    # 监控配置
+    monitor_interval: int = 5  # 监控间隔（秒）
+    order_check_interval: int = 3  # 订单检查间隔（秒）
+    
+    # 重试配置
+    max_retry_attempts: int = 3  # 最大重试次数
+    retry_delay: int = 2  # 重试延迟（秒）
+    
+    # 账户配置
+    long_account_enabled: bool = True
+    short_account_enabled: bool = True
+    
+    def __post_init__(self):
+        """初始化后处理"""
+        decimal_fields = ['base_investment', 'max_investment', 'grid_spacing_percent', 
+                         'max_drawdown_percent', 'position_size_percent', 'position_size_ratio', 'atr_multiplier', 'leverage']
+        for field_name in decimal_fields:
+            value = getattr(self, field_name)
+            if isinstance(value, (int, float)):
+                setattr(self, field_name, Decimal(str(value)))
+
+@dataclass
+class RiskMetrics:
+    """风险指标数据结构"""
+    strategy_id: str
+    
+    # 账户余额信息
+    total_balance: Decimal = field(default_factory=lambda: Decimal("0"))
+    available_balance: Decimal = field(default_factory=lambda: Decimal("0"))
+    margin_used: Decimal = field(default_factory=lambda: Decimal("0"))
+    margin_ratio: Decimal = field(default_factory=lambda: Decimal("0"))
+    unrealized_pnl: Decimal = field(default_factory=lambda: Decimal("0"))
+    
+    # 持仓暴露信息
+    long_exposure: Decimal = field(default_factory=lambda: Decimal("0"))
+    short_exposure: Decimal = field(default_factory=lambda: Decimal("0"))
+    net_exposure: Decimal = field(default_factory=lambda: Decimal("0"))
+    
+    # 风险度量
+    value_at_risk: Decimal = field(default_factory=lambda: Decimal("0"))  # VaR值
+    expected_shortfall: Decimal = field(default_factory=lambda: Decimal("0"))  # 期望损失
+    
+    # 波动率指标
+    volatility: Decimal = field(default_factory=lambda: Decimal("0"))  # 历史波动率
+    beta: Decimal = field(default_factory=lambda: Decimal("1.0"))  # 贝塔系数
+    
+    # 杠杆指标
+    leverage_ratio: Decimal = field(default_factory=lambda: Decimal("1.0"))  # 杠杆比率
+    
+    # 流动性风险
+    liquidity_score: Decimal = field(default_factory=lambda: Decimal("1.0"))  # 流动性评分
+    
+    # 交易表现指标
+    max_drawdown: Decimal = field(default_factory=lambda: Decimal("0"))
+    win_rate: Decimal = field(default_factory=lambda: Decimal("0"))
+    profit_factor: Decimal = field(default_factory=lambda: Decimal("0"))
+    
+    # 时间指标
+    calculation_time: float = field(default_factory=time.time)
+    
+    def __post_init__(self):
+        """初始化后处理"""
+        decimal_fields = ['total_balance', 'available_balance', 'margin_used', 'margin_ratio', 
+                         'unrealized_pnl', 'long_exposure', 'short_exposure', 'net_exposure',
+                         'value_at_risk', 'expected_shortfall', 'volatility', 'beta', 
+                         'leverage_ratio', 'liquidity_score', 'max_drawdown', 'win_rate', 
+                         'profit_factor']
+        for field_name in decimal_fields:
+            value = getattr(self, field_name)
+            if isinstance(value, (int, float)):
+                setattr(self, field_name, Decimal(str(value)))
+
+@dataclass
+class PositionInfo:
+    """持仓信息数据结构"""
+    symbol: str
+    side: str  # "LONG" 或 "SHORT"
+    leverage: int = field(default=1)
+    margin_type: str = field(default="CROSS")
+    size: Decimal = field(default_factory=lambda: Decimal("0"))
+    entry_price: Decimal = field(default_factory=lambda: Decimal("0"))
+    mark_price: Decimal = field(default_factory=lambda: Decimal("0"))
+    unrealized_pnl: Decimal = field(default_factory=lambda: Decimal("0"))
+    realized_pnl: Decimal = field(default_factory=lambda: Decimal("0"))
+    initial_margin: Decimal = field(default_factory=lambda: Decimal("0"))
+    maintenance_margin: Decimal = field(default_factory=lambda: Decimal("0"))
+    open_time: float = field(default_factory=time.time)
+    update_time: float = field(default_factory=time.time)
+    
+    def __post_init__(self):
+        """初始化后处理"""
+        decimal_fields = ['size', 'entry_price', 'mark_price', 'unrealized_pnl', 
+                         'realized_pnl', 'initial_margin', 'maintenance_margin']
+        for field_name in decimal_fields:
+            value = getattr(self, field_name)
+            if isinstance(value, (int, float)):
+                setattr(self, field_name, Decimal(str(value)))

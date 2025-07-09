@@ -27,10 +27,10 @@ class ATRAnalyzer:
         
     async def calculate_atr(self, klines: List[Dict[str, Any]]) -> Decimal:
         """
-        计算ATR值
+        计算ATR值 - 与TradingView Pine Script完全一致
         
         Args:
-            klines: K线数据列表，每个元素包含 [timestamp, open, high, low, close, volume]
+            klines: K线数据列表
             
         Returns:
             ATR值
@@ -39,22 +39,28 @@ class ATRAnalyzer:
             raise ValueError(f"K线数据不足，需要至少{self.period + 1}根K线")
         
         try:
-            # 转换为DataFrame
+            # 转换为DataFrame，使用币安API的12列格式
             df = pd.DataFrame(klines)
-            df.columns = ['timestamp', 'open', 'high', 'low', 'close', 'volume']
+            df.columns = [
+                'open_time', 'open', 'high', 'low', 'close', 'volume',
+                'close_time', 'quote_volume', 'count', 'taker_buy_volume', 
+                'taker_buy_quote_volume', 'ignore'
+            ]
             
-            # 转换为数值类型
+            # 转换为数值类型（只处理OHLC数据）
             for col in ['open', 'high', 'low', 'close']:
                 df[col] = pd.to_numeric(df[col])
             
-            # 计算True Range
+            # 计算True Range (与Pine Script的tr(true)完全一致)
             df['prev_close'] = df['close'].shift(1)
             df['tr1'] = df['high'] - df['low']
             df['tr2'] = abs(df['high'] - df['prev_close'])
             df['tr3'] = abs(df['low'] - df['prev_close'])
             df['true_range'] = df[['tr1', 'tr2', 'tr3']].max(axis=1)
             
-            # 计算ATR (使用RMA平滑)
+            # 使用RMA计算ATR (与Pine Script的RMA完全一致)
+            # RMA(x, n) = (x + (n-1) * prev_rma) / n
+            # 这等同于EWM with alpha = 1/n
             df['atr'] = df['true_range'].ewm(alpha=1/self.period, adjust=False).mean()
             
             # 返回最新的ATR值
@@ -69,7 +75,11 @@ class ATRAnalyzer:
     
     async def calculate_atr_channel(self, klines: List[Dict[str, Any]]) -> Tuple[Decimal, Decimal, Decimal]:
         """
-        计算ATR通道边界
+        计算ATR通道边界 - 与TradingView Pine Script完全一致
+        
+        TradingView逻辑:
+        x = ATR * multiplier + high  (上轨 = ATR倍数 + 最高价)
+        x2 = low - ATR * multiplier  (下轨 = 最低价 - ATR倍数)
         
         Args:
             klines: K线数据列表
@@ -81,22 +91,29 @@ class ATRAnalyzer:
             # 计算ATR
             atr_value = await self.calculate_atr(klines)
             
-            # 转换K线数据
+            # 转换K线数据，使用币安API的12列格式
             df = pd.DataFrame(klines)
-            df.columns = ['timestamp', 'open', 'high', 'low', 'close', 'volume']
+            df.columns = [
+                'open_time', 'open', 'high', 'low', 'close', 'volume',
+                'close_time', 'quote_volume', 'count', 'taker_buy_volume', 
+                'taker_buy_quote_volume', 'ignore'
+            ]
             
             for col in ['high', 'low']:
                 df[col] = pd.to_numeric(df[col])
             
-            # 计算移动平均
-            high_ma = df['high'].rolling(window=self.period).mean().iloc[-1]
-            low_ma = df['low'].rolling(window=self.period).mean().iloc[-1]
+            # 获取最新的最高价和最低价 (与TradingView的src1=high, src2=low一致)
+            current_high = Decimal(str(df['high'].iloc[-1]))
+            current_low = Decimal(str(df['low'].iloc[-1]))
             
-            # 计算通道边界
-            upper_bound = Decimal(str(high_ma)) + (atr_value * Decimal(str(self.multiplier)))
-            lower_bound = Decimal(str(low_ma)) - (atr_value * Decimal(str(self.multiplier)))
+            # 计算ATR倍数
+            atr_multiplied = atr_value * Decimal(str(self.multiplier))
             
-            logger.info(f"ATR通道计算完成: 上轨={upper_bound:.2f}, 下轨={lower_bound:.2f}, ATR={atr_value:.6f}")
+            # 计算通道边界 (与TradingView Pine Script完全一致)
+            upper_bound = atr_multiplied + current_high  # x = ATR * m + src1 (high)
+            lower_bound = current_low - atr_multiplied   # x2 = src2 (low) - ATR * m
+            
+            logger.info(f"ATR通道计算完成: 上轨={upper_bound:.6f}, 下轨={lower_bound:.6f}, ATR={atr_value:.6f}")
             
             return upper_bound, lower_bound, atr_value
             
@@ -164,98 +181,17 @@ class ATRAnalyzer:
     
     def calculate_grid_spacing(self, atr_value: Decimal, atr_multiplier: Decimal) -> Decimal:
         """
-        计算网格间距
+        计算网格间距（传统ATR方法）
         
         Args:
             atr_value: ATR值
-            atr_multiplier: ATR倍数
+            atr_multiplier: ATR倍数（可调参数）
             
         Returns:
             网格间距（价格单位）
         """
+        # 使用传统ATR方法计算网格间距
         spacing = atr_value * atr_multiplier
-        logger.info(f"计算网格间距: ATR={atr_value:.6f}, 倍数={atr_multiplier}, 间距={spacing:.6f}")
+        logger.info(f"计算网格间距(传统ATR方法): ATR={atr_value:.6f}, 倍数={atr_multiplier}, 间距={spacing:.6f}")
+        
         return spacing
-    
-    def validate_market_conditions(self, klines: List[Dict[str, Any]]) -> bool:
-        """
-        验证市场条件是否适合网格交易
-        
-        Args:
-            klines: K线数据
-            
-        Returns:
-            True表示市场条件适合
-        """
-        try:
-            if len(klines) < self.period:
-                return False
-            
-            # 检查数据完整性
-            for kline in klines[-self.period:]:
-                if not all(key in kline for key in ['open', 'high', 'low', 'close']):
-                    logger.error("K线数据不完整")
-                    return False
-                
-                # 检查价格的合理性
-                high = float(kline['high'])
-                low = float(kline['low'])
-                open_price = float(kline['open'])
-                close = float(kline['close'])
-                
-                if high < low or high < open_price or high < close:
-                    logger.error("K线数据异常：最高价小于其他价格")
-                    return False
-                
-                if low > open_price or low > close:
-                    logger.error("K线数据异常：最低价大于其他价格")
-                    return False
-            
-            logger.info("市场条件验证通过")
-            return True
-            
-        except Exception as e:
-            logger.error(f"验证市场条件失败: {e}")
-            return False
-    
-    async def get_volatility_metrics(self, klines: List[Dict[str, Any]]) -> Dict[str, float]:
-        """
-        获取波动率指标
-        
-        Args:
-            klines: K线数据
-            
-        Returns:
-            波动率指标字典
-        """
-        try:
-            df = pd.DataFrame(klines)
-            df.columns = ['timestamp', 'open', 'high', 'low', 'close', 'volume']
-            df['close'] = pd.to_numeric(df['close'])
-            
-            # 计算收益率
-            df['returns'] = df['close'].pct_change()
-            
-            # 计算各种波动率指标
-            volatility = df['returns'].std() * np.sqrt(24)  # 日化波动率
-            max_change = df['returns'].abs().max()
-            avg_change = df['returns'].abs().mean()
-            
-            metrics = {
-                'daily_volatility': float(volatility),
-                'max_change': float(max_change),
-                'avg_change': float(avg_change),
-                'current_atr_ratio': float(await self.calculate_atr(klines)) / float(df['close'].iloc[-1])
-            }
-            
-            logger.info(f"波动率指标: {metrics}")
-            return metrics
-            
-        except Exception as e:
-            logger.error(f"计算波动率指标失败: {e}")
-            return {}
-    
-    def cache_klines(self, klines: List[Dict[str, Any]]) -> None:
-        """缓存K线数据"""
-        self.klines_cache = klines[-self.period * 3:]  # 保留3倍周期的数据
-        logger.debug(f"缓存K线数据: {len(self.klines_cache)}根")
