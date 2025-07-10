@@ -8,7 +8,10 @@ import time
 import ccxt
 import math
 import os
+import signal
+import sys
 import asyncio
+import uuid
 from dotenv import load_dotenv
 
 # 加载环境变量
@@ -262,32 +265,43 @@ class GridTradingBot:
         # 启动 listenKey 更新任务
         asyncio.create_task(self.keep_listen_key_alive())
 
-        while True:
+        while not shutdown_event.is_set():
             try:
                 await self.connect_websocket()
             except Exception as e:
                 logger.error(f"WebSocket 连接失败: {e}")
-                await asyncio.sleep(5)  # 等待 5 秒后重试
+                if not shutdown_event.is_set():
+                    await asyncio.sleep(5)  # 等待 5 秒后重试
 
     async def connect_websocket(self):
         """连接 WebSocket 并订阅 ticker 和持仓数据"""
-        async with websockets.connect(WEBSOCKET_URL) as websocket:
-            # 订阅 ticker 数据
-            await self.subscribe_ticker(websocket)
-            # 订阅挂单数据
-            await self.subscribe_orders(websocket)
-            while True:
-                try:
-                    message = await websocket.recv()
-                    data = json.loads(message)
-                    # print(data)
-                    if data.get("e") == "bookTicker":
-                        await self.handle_ticker_update(message)
-                    elif data.get("e") == "ORDER_TRADE_UPDATE":  # 处理挂单更新
-                        await self.handle_order_update(message)
-                except Exception as e:
-                    logger.error(f"WebSocket 消息处理失败: {e}")
-                    break
+        try:
+            async with websockets.connect(WEBSOCKET_URL) as websocket:
+                # 订阅 ticker 数据
+                await self.subscribe_ticker(websocket)
+                # 订阅挂单数据
+                await self.subscribe_orders(websocket)
+                
+                while not shutdown_event.is_set():
+                    try:
+                        # 使用超时来检查退出信号
+                        message = await asyncio.wait_for(websocket.recv(), timeout=1.0)
+                        data = json.loads(message)
+                        # print(data)
+                        if data.get("e") == "bookTicker":
+                            await self.handle_ticker_update(message)
+                        elif data.get("e") == "ORDER_TRADE_UPDATE":  # 处理挂单更新
+                            await self.handle_order_update(message)
+                    except asyncio.TimeoutError:
+                        # 超时是正常的，继续循环检查退出信号
+                        continue
+                    except Exception as e:
+                        logger.error(f"WebSocket 消息处理失败: {e}")
+                        break
+        except Exception as e:
+            if not shutdown_event.is_set():
+                logger.error(f"WebSocket 连接异常: {e}")
+                raise
 
     async def subscribe_ticker(self, websocket):
         """订阅 ticker 数据"""
@@ -328,19 +342,37 @@ class GridTradingBot:
 
     async def keep_listen_key_alive(self):
         """定期更新 listenKey"""
-        while True:
+        while not shutdown_event.is_set():
             try:
-                await asyncio.sleep(1800)  # 每 30 分钟更新一次
+                # 使用可中断的睡眠
+                try:
+                    await asyncio.wait_for(asyncio.sleep(1800), timeout=1800)  # 每 30 分钟更新一次
+                except asyncio.TimeoutError:
+                    pass  # 正常超时，继续更新
+                
+                if shutdown_event.is_set():
+                    break
+                    
                 self.exchange.fapiPrivatePutListenKey()
                 self.listenKey = self.get_listen_key()  # 更新 self.listenKey
                 logger.info(f"listenKey 已更新: {self.listenKey}")
             except Exception as e:
                 logger.error(f"更新 listenKey 失败: {e}")
-                await asyncio.sleep(60)  # 等待 60 秒后重试
+                if not shutdown_event.is_set():
+                    try:
+                        await asyncio.wait_for(asyncio.sleep(60), timeout=60)  # 等待 60 秒后重试
+                    except asyncio.TimeoutError:
+                        pass
 
     def _generate_sign(self, message):
         """生成 HMAC-SHA256 签名"""
         return hmac.new(self.api_secret.encode("utf-8"), message.encode("utf-8"), hashlib.sha256).hexdigest()
+
+    def _generate_unique_order_id(self):
+        """生成唯一的客户端订单ID"""
+        timestamp = str(int(time.time() * 1000))  # 毫秒时间戳
+        random_suffix = str(uuid.uuid4())[:8]  # 取UUID的前8位
+        return f"grid_{timestamp}_{random_suffix}"
 
     async def handle_ticker_update(self, message):
         current_time = time.time()
@@ -378,7 +410,7 @@ class GridTradingBot:
             if time.time() - self.last_orders_update_time > SYNC_TIME:  # 超过 60 秒未更新
                 self.check_orders_status()
                 self.last_orders_update_time = time.time()
-                logger.info(f"同步 orders: 多头买单 {self.buy_long_orders} 张, 多头卖单 {self.sell_long_orders} 张,空头卖单 {self.sell_short_orders} 张, 空头买单 {self.buy_short_orders} 张 @ ticker")
+                logger.info(f"同步 orders: 多头买单 {self.buy_long_orders} 张, 多头卖单 {self.sell_long_orders} 张,空头卖单 {self.sell_short_orders} 张, 空头买入 {self.buy_short_orders} 张 @ ticker")
 
             await self.adjust_grid_strategy()
 
@@ -571,7 +603,7 @@ class GridTradingBot:
             # 如果是市价单，不需要价格参数
             if order_type == 'market':
                 params = {
-                    'newClientOrderId': 'x-TBzTen1X',
+                    'newClientOrderId': self._generate_unique_order_id(),
                     'reduce_only': is_reduce_only,
                 }
                 if position_side is not None:
@@ -585,7 +617,7 @@ class GridTradingBot:
                     return None
 
                 params = {
-                    'newClientOrderId': 'x-TBzTen1X',
+                    'newClientOrderId': self._generate_unique_order_id(),
                     'reduce_only': is_reduce_only,
                 }
                 if position_side is not None:
@@ -628,7 +660,7 @@ class GridTradingBot:
             if side == 'long':
                 # 卖出多头仓位止盈，应该使用 close_long 来平仓
                 params = {
-                    'newClientOrderId': 'x-TBzTen1X',
+                    'newClientOrderId': self._generate_unique_order_id(),
                     'reduce_only': True,
                     'positionSide': 'LONG'
                 }
@@ -637,7 +669,7 @@ class GridTradingBot:
             elif side == 'short':
                 # 买入空头仓位止盈，应该使用 close_short 来平仓
                 order = self.exchange.create_order(ccxt_symbol, 'limit', 'buy', quantity, price, {
-                    'newClientOrderId': 'x-TBzTen1X',
+                    'newClientOrderId': self._generate_unique_order_id(),
                     'reduce_only': True,
                     'positionSide': 'SHORT'
                 })
@@ -811,11 +843,120 @@ class GridTradingBot:
                 else:
                     await self.place_short_orders(self.latest_price)
 
+    async def cleanup_strategy(self):
+        """清理策略：撤销所有挂单并平掉所有持仓"""
+        logger.info("开始清理策略：撤销所有挂单并平掉所有持仓...")
+        
+        try:
+            # 1. 撤销所有挂单
+            logger.info("正在撤销所有挂单...")
+            open_orders = self.exchange.fetch_open_orders(self.ccxt_symbol)
+            if open_orders:
+                for order in open_orders:
+                    try:
+                        self.exchange.cancel_order(order['id'], self.ccxt_symbol)
+                        logger.info(f"撤销挂单成功: {order['id']}")
+                    except Exception as e:
+                        logger.warning(f"撤销挂单失败: {order['id']}, 错误: {e}")
+                        
+                # 等待撤单完成
+                await asyncio.sleep(2)
+            else:
+                logger.info("没有发现挂单")
+
+            # 2. 平掉所有持仓
+            logger.info("正在平掉所有持仓...")
+            positions = self.exchange.fetch_positions([self.ccxt_symbol])
+            
+            for position in positions:
+                if position['contracts'] != 0:  # 有持仓
+                    side = 'sell' if position['side'] == 'long' else 'buy'
+                    size = abs(position['contracts'])
+                    
+                    try:
+                        # 市价平仓 - 移除 reduceOnly 参数，币安已自动处理
+                        order = self.exchange.create_market_order(
+                            symbol=self.ccxt_symbol,
+                            side=side,
+                            amount=size,
+                            params={
+                                'positionSide': position['side'].upper()
+                            }
+                        )
+                        logger.info(f"平仓成功: {position['side']} {size} 张, 订单ID: {order['id']}")
+                    except Exception as e:
+                        logger.error(f"平仓失败: {position['side']} {size} 张, 错误: {e}")
+                        
+            logger.info("策略清理完成")
+            
+        except Exception as e:
+            logger.error(f"清理策略时发生错误: {e}")
+            raise
+
 
 # ==================== 主程序 ====================
+# 全局变量用于控制程序退出
+bot_instance = None
+shutdown_event = asyncio.Event()
+
+def signal_handler(signum, frame):
+    """信号处理函数"""
+    logger.info(f"收到退出信号: {signum}, 开始优雅退出...")
+    shutdown_event.set()
+
+async def cleanup_and_exit():
+    """清理并退出"""
+    if bot_instance:
+        try:
+            await bot_instance.cleanup_strategy()
+        except Exception as e:
+            logger.error(f"清理策略时发生错误: {e}")
+    logger.info("程序退出")
+    sys.exit(0)
+
 async def main():
-    bot = GridTradingBot(API_KEY, API_SECRET, COIN_NAME, CONTRACT_TYPE, GRID_SPACING, INITIAL_QUANTITY, LEVERAGE)
-    await bot.run()
+    global bot_instance
+    
+    # 注册信号处理
+    signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGINT, signal_handler)
+    
+    try:
+        bot_instance = GridTradingBot(API_KEY, API_SECRET, COIN_NAME, CONTRACT_TYPE, GRID_SPACING, INITIAL_QUANTITY, LEVERAGE)
+        
+        # 创建运行任务和监控退出事件的任务
+        run_task = asyncio.create_task(bot_instance.run())
+        shutdown_task = asyncio.create_task(shutdown_event.wait())
+        
+        # 等待任一任务完成
+        done, pending = await asyncio.wait(
+            [run_task, shutdown_task],
+            return_when=asyncio.FIRST_COMPLETED
+        )
+        
+        # 取消未完成的任务
+        for task in pending:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        
+        # 如果是收到退出信号，执行清理
+        if shutdown_event.is_set():
+            await cleanup_and_exit()
+            
+    except KeyboardInterrupt:
+        logger.info("收到键盘中断，开始优雅退出...")
+        await cleanup_and_exit()
+    except Exception as e:
+        logger.error(f"程序异常退出: {e}")
+        if bot_instance:
+            try:
+                await bot_instance.cleanup_strategy()
+            except Exception as cleanup_error:
+                logger.error(f"清理策略时发生错误: {cleanup_error}")
+        raise
 
 if __name__ == "__main__":
     asyncio.run(main())

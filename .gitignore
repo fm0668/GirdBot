@@ -4,8 +4,13 @@
 *.env.production
 
 # 日志文件
-logs/*.log
-logs/*.txt
+log/*.log
+log/*.txt
+*.log
+
+# 进程ID文件
+*.pid
+grid_strategy.pid
 
 # Python 相关
 __pycache__/
@@ -28,6 +33,8 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+venv/
+env/
 
 # IDE 相关
 .vscode/settings.json
@@ -46,23 +53,13 @@ wheels/
 ehthumbs.db
 Thumbs.db
 
-# 参考资料和说明文档 (按要求排除)
-参考资料/
-
-# 排除生成的文档（保留用户创建的README.md）
-VERSION.md
-DELIVERY.md
-DEPLOYMENT.md
-GIT_PUSH_GUIDE.md
-README_GITHUB.md
-README_FOR_GITHUB.md
-DEPLOY_CHECKLIST.md
-QUICK_DEPLOY_GUIDE.md
-READY_TO_DEPLOY.md
-
 # 测试和临时文件
-test_*.py
 temp/
 tmp/
 *.tmp
 *.bak
+
+# 脚本执行文件
+exec_recipe.log
+exec_recipe.sh
+recipe_*.bash

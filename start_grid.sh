@@ -33,4 +33,26 @@ if grep -q "your_actual_api_key_here" .env; then
 fi
 
 echo "启动网格策略..."
-python grid_binance.py
+# 检查是否已有进程在运行
+if [ -f "grid_strategy.pid" ]; then
+    PID=$(cat grid_strategy.pid)
+    if ps -p $PID > /dev/null 2>&1; then
+        echo "策略已在运行中，进程ID: $PID"
+        echo "如需重启，请先运行 ./stop_grid.sh"
+        exit 1
+    else
+        echo "发现僵尸PID文件，正在清理..."
+        rm -f grid_strategy.pid
+    fi
+fi
+
+# 后台运行策略并保存PID
+nohup python grid_binance.py > log/grid_output.log 2>&1 &
+PID=$!
+echo $PID > grid_strategy.pid
+
+echo "策略已启动，进程ID: $PID"
+echo "日志文件: log/grid_binance.log 和 log/grid_output.log"
+echo "使用 ./status_grid.sh 查看运行状态"
+echo "使用 ./stop_grid.sh 停止策略"
+echo "=== 启动完成 ==="
