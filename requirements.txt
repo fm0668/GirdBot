@@ -1,15 +1,18 @@
 # 双账户对冲网格策略依赖包
-asyncio>=3.4.3
-aiohttp>=3.8.0
+# 核心策略依赖
+ccxt==4.2.85
+websockets==12.0
+aiohttp==3.9.3
+asyncio==3.4.3
+python-dotenv==1.0.0
+
+# 原有依赖包
 python-binance>=1.0.16
-ccxt>=4.0.0
 pandas>=1.5.0
 numpy>=1.21.0
 pydantic>=1.10.0
-python-dotenv>=0.19.0
 loguru>=0.6.0
 redis>=4.3.0
-websockets>=10.0
 uvloop>=0.17.0
 psutil>=5.9.0
 pytest>=7.0.0
