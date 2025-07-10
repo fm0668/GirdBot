@@ -29,6 +29,69 @@ class PrecisionHelper:
         
         return self._symbol_info_cache[symbol]
     
+    def get_symbol_info_safe(self, symbol_info) -> Dict:
+        """
+        安全地获取交易对信息
+        
+        Args:
+            symbol_info: 交易对信息（可能是字符串或字典）
+            
+        Returns:
+            标准化的交易对信息字典
+        """
+        try:
+            # 如果是字符串，创建默认配置
+            if isinstance(symbol_info, str):
+                return {
+                    'symbol': symbol_info,
+                    'filters': [
+                        {
+                            'filterType': 'PRICE_FILTER',
+                            'tickSize': '0.000001'
+                        },
+                        {
+                            'filterType': 'LOT_SIZE',
+                            'stepSize': '1',
+                            'minQty': '1'
+                        },
+                        {
+                            'filterType': 'MIN_NOTIONAL',
+                            'notional': '5'
+                        }
+                    ]
+                }
+            
+            # 如果是字典，直接返回
+            if isinstance(symbol_info, dict):
+                return symbol_info
+            
+            # 其他情况返回默认配置
+            return {
+                'symbol': 'UNKNOWN',
+                'filters': [
+                    {
+                        'filterType': 'PRICE_FILTER',
+                        'tickSize': '0.000001'
+                    },
+                    {
+                        'filterType': 'LOT_SIZE',
+                        'stepSize': '1',
+                        'minQty': '1'
+                    },
+                    {
+                        'filterType': 'MIN_NOTIONAL',
+                        'notional': '5'
+                    }
+                ]
+            }
+            
+        except Exception as e:
+            logger.error(f"处理交易对信息失败: {e}")
+            return {
+                'symbol': 'ERROR',
+                'filters': []
+            }
+    
     def get_price_precision(self, symbol_info: Dict) -> Decimal:
         """获取价格精度"""
         for filter_info in symbol_info.get('filters', []):

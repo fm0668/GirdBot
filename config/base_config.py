@@ -18,8 +18,10 @@ class APIConfig:
 class TradingConfig:
     """交易配置"""
     symbol: str = "DOGEUSDC"
+    symbol_id: str = "DOGEUSDC"    # 交易所API中的symbol ID
     base_asset: str = "DOGE"
-    quote_asset: str = "USDC"  
+    quote_asset: str = "USDC"
+    settle_asset: str = "USDC"      # 结算货币  
     
     # 网格参数
     max_open_orders: int = 4  # 最大同时挂单数
@@ -99,8 +101,21 @@ class BaseConfig(ABC):
             testnet=os.getenv("SHORT_TESTNET", "false").lower() == "true"
         )
         
+        # 处理交易对配置
+        trading_symbol = os.getenv("TRADING_SYMBOL", "BTCUSDT")
+        
+        # 如果是DOGEUSDC，转换为永续合约格式
+        if trading_symbol == "DOGEUSDC":
+            futures_symbol = "DOGE/USDC:USDC"
+            symbol_id = "DOGEUSDC"
+        else:
+            # 其他交易对的处理逻辑
+            futures_symbol = trading_symbol
+            symbol_id = trading_symbol
+        
         self.trading = TradingConfig(
-            symbol=os.getenv("TRADING_SYMBOL", "BTCUSDT")
+            symbol=futures_symbol,
+            symbol_id=symbol_id
         )
         
         self.risk = RiskConfig()

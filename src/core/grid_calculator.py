@@ -628,3 +628,88 @@ class GridCalculator:
                 "is_adequate": False,
                 "error": str(e)
             }
+    
+    async def calculate_grid_spacing(self, atr_value: Decimal, current_price: Decimal, 
+                                   grid_count: int = 10) -> Decimal:
+        """
+        计算网格间距
+        
+        Args:
+            atr_value: ATR值
+            current_price: 当前价格
+            grid_count: 网格数量
+            
+        Returns:
+            网格间距
+        """
+        try:
+            # 基于ATR计算间距
+            # 使用ATR的一定比例作为网格间距
+            spacing_ratio = Decimal('0.2')  # 20%的ATR作为间距
+            grid_spacing = atr_value * spacing_ratio
+            
+            # 确保间距不会太小或太大
+            min_spacing = current_price * Decimal('0.001')  # 最小0.1%
+            max_spacing = current_price * Decimal('0.01')   # 最大1%
+            
+            grid_spacing = max(min_spacing, min(grid_spacing, max_spacing))
+            
+            logger.info(f"网格间距计算: ATR={atr_value:.6f}, 当前价格={current_price:.6f}, "
+                       f"间距={grid_spacing:.6f}, 比例={float(grid_spacing/current_price*100):.3f}%")
+            
+            return grid_spacing
+            
+        except Exception as e:
+            logger.error(f"计算网格间距失败: {e}")
+            return current_price * Decimal('0.005')  # 默认0.5%
+    
+    async def calculate_grid_spacing_from_bounds(self, upper_bound: Decimal, lower_bound: Decimal) -> Decimal:
+        """
+        根据价格边界计算网格间距
+        
+        Args:
+            upper_bound: 价格上轨
+            lower_bound: 价格下轨
+            
+        Returns:
+            网格间距
+        """
+        try:
+            price_range = upper_bound - lower_bound
+            # 假设分成20个网格
+            grid_spacing = price_range / Decimal('20')
+            
+            logger.info(f"根据边界计算网格间距: 价格区间={price_range:.6f}, 间距={grid_spacing:.6f}")
+            
+            return grid_spacing
+            
+        except Exception as e:
+            logger.error(f"根据边界计算网格间距失败: {e}")
+            return Decimal('0.001')
+    
+    async def calculate_grid_amount(self, total_margin: Decimal, max_levels: int) -> Decimal:
+        """
+        计算单个网格的下单金额
+        
+        Args:
+            total_margin: 总保证金
+            max_levels: 最大网格层数
+            
+        Returns:
+            单个网格的下单金额
+        """
+        try:
+            # 使用80%的保证金进行网格交易
+            usable_margin = total_margin * Decimal('0.8')
+            
+            # 平均分配到每个网格
+            grid_amount = usable_margin / Decimal(str(max_levels))
+            
+            logger.info(f"网格金额计算: 总保证金={total_margin:.2f}, 可用={usable_margin:.2f}, "
+                       f"单格金额={grid_amount:.2f}")
+            
+            return grid_amount
+            
+        except Exception as e:
+            logger.error(f"计算网格金额失败: {e}")
+            return Decimal('50')  # 默认$50

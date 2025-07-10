@@ -447,6 +447,67 @@ class StopLossManager:
             self.logger.error(f"启动健康检查异常: {e}")
             return False
     
+    async def calculate_stop_loss_price(self, current_price: Decimal, position_side: PositionSide, 
+                                      atr_value: Decimal, atr_multiplier: float = 2.0) -> Decimal:
+        """
+        计算止损价格
+        
+        Args:
+            current_price: 当前价格
+            position_side: 持仓方向
+            atr_value: ATR值
+            atr_multiplier: ATR倍数
+            
+        Returns:
+            止损价格
+        """
+        try:
+            atr_distance = atr_value * Decimal(str(atr_multiplier))
+            
+            if position_side == PositionSide.LONG:
+                # 多头止损：当前价格 - ATR距离
+                stop_loss_price = current_price - atr_distance
+            else:  # PositionSide.SHORT
+                # 空头止损：当前价格 + ATR距离
+                stop_loss_price = current_price + atr_distance
+            
+            self.logger.info(f"计算止损价格: {position_side.value} @ {current_price} -> {stop_loss_price}")
+            return stop_loss_price
+            
+        except Exception as e:
+            self.logger.error(f"计算止损价格失败: {e}")
+            raise
+    
+    async def check_stop_loss_trigger(self, current_price: Decimal, position_side: PositionSide,
+                                    stop_loss_price: Decimal) -> bool:
+        """
+        检查是否触发止损
+        
+        Args:
+            current_price: 当前价格
+            position_side: 持仓方向
+            stop_loss_price: 止损价格
+            
+        Returns:
+            是否触发止损
+        """
+        try:
+            if position_side == PositionSide.LONG:
+                # 多头止损：价格跌破止损价格
+                triggered = current_price <= stop_loss_price
+            else:  # PositionSide.SHORT
+                # 空头止损：价格涨破止损价格
+                triggered = current_price >= stop_loss_price
+            
+            if triggered:
+                self.logger.warning(f"止损触发: {position_side.value} @ {current_price} vs {stop_loss_price}")
+            
+            return triggered
+            
+        except Exception as e:
+            self.logger.error(f"检查止损触发失败: {e}")
+            return False
+
     def get_stop_loss_status(self) -> Dict:
         """获取止损状态信息"""
         return {

@@ -1,0 +1,130 @@
+{
+  "币安原生API数据获取": {
+    "success": true,
+    "details": "成功获取100根K线，格式: 12列",
+    "data": {
+      "count": 100,
+      "format": "binance_12col"
+    },
+    "timestamp": "2025-07-10T09:24:55.273218"
+  },
+  "CCXT数据获取": {
+    "success": true,
+    "details": "成功获取10根K线，格式: 6列",
+    "data": {
+      "count": 10,
+      "format": "ccxt_6col"
+    },
+    "timestamp": "2025-07-10T09:24:55.990718"
+  },
+  "K线格式检测": {
+    "success": true,
+    "details": "检测到格式: binance_12col",
+    "data": {
+      "format": "binance_12col"
+    },
+    "timestamp": "2025-07-10T09:24:56.054850"
+  },
+  "ATR计算": {
+    "success": true,
+    "details": "ATR值: 0.001847",
+    "data": {
+      "atr": 0.0018469059724445318
+    },
+    "timestamp": "2025-07-10T09:24:56.059282"
+  },
+  "ATR通道计算": {
+    "success": true,
+    "details": "上轨: 0.186394, 下轨: 0.178106",
+    "data": {
+      "upper": 0.18639381194488908,
+      "lower": 0.17810618805511094
+    },
+    "timestamp": "2025-07-10T09:24:56.063143"
+  },
+  "多重ATR通道": {
+    "success": true,
+    "details": "计算了4个通道",
+    "data": {
+      "bands_count": 4
+    },
+    "timestamp": "2025-07-10T09:24:56.066623"
+  },
+  "市场分析": {
+    "success": true,
+    "details": "波动率: high, 趋势: neutral",
+    "data": {
+      "atr_value": 0.0018469059724445318,
+      "upper_bound": 0.18639381194488908,
+      "lower_bound": 0.17810618805511094,
+      "current_price": 0.18192,
+      "volatility_level": "high",
+      "price_position": "neutral",
+      "trend": "neutral",
+      "analysis_time": "2025-07-10T09:24:56.074027"
+    },
+    "timestamp": "2025-07-10T09:24:56.074082"
+  },
+  "网格计算器": {
+    "success": false,
+    "details": "缺少calculate_grid_spacing方法",
+    "data": null,
+    "timestamp": "2025-07-10T09:24:56.074150"
+  },
+  "最大层数计算": {
+    "success": true,
+    "details": "最大层数: 20",
+    "data": {
+      "max_levels": 20
+    },
+    "timestamp": "2025-07-10T09:24:56.074212"
+  },
+  "精度助手测试": {
+    "success": false,
+    "details": "'str' object has no attribute 'get'",
+    "data": null,
+    "timestamp": "2025-07-10T09:24:56.074246"
+  },
+  "API配置检查": {
+    "success": true,
+    "details": "双账户API配置正常",
+    "data": {
+      "has_long": true,
+      "has_short": true
+    },
+    "timestamp": "2025-07-10T09:24:56.074306"
+  },
+  "交易配置检查": {
+    "success": true,
+    "details": "交易对: DOGE/USDC:USDC, 杠杆: 1",
+    "data": {
+      "symbol": "DOGE/USDC:USDC",
+      "leverage": 1,
+      "atr_period": 14,
+      "grid_spacing_multiplier": 0.26
+    },
+    "timestamp": "2025-07-10T09:24:56.074319"
+  },
+  "订单管理器配置": {
+    "success": true,
+    "details": "账户和策略配置创建成功",
+    "data": {
+      "account_type": "TEST",
+      "symbol": "DOGE/USDC:USDC",
+      "leverage": 10
+    },
+    "timestamp": "2025-07-10T09:24:56.074348"
+  },
+  "风险管理测试": {
+    "success": false,
+    "details": "'StopLossManager' object has no attribute 'calculate_stop_loss_price'",
+    "data": null,
+    "timestamp": "2025-07-10T09:24:56.074395"
+  },
+  "数据同步测试": {
+    "success": false,
+    "details": "DualAccountManager.__init__() missing 1 required positional argument: 'short_config'",
+    "data": null,
+    "timestamp": "2025-07-10T09:24:56.074423"
+  }
+}
