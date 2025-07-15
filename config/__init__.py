@@ -1,4 +1,13 @@
-# 配置管理模块
-from .settings import config, TradingConfig
+"""
+配置管理模块
+包含双账户配置和执行器配置管理功能
+"""
 
-__all__ = ['config', 'TradingConfig']
+from .dual_account_config import DualAccountConfig, AccountConfig
+from .grid_executor_config import GridExecutorConfig
+
+__all__ = [
+    "DualAccountConfig",
+    "AccountConfig", 
+    "GridExecutorConfig"
+]

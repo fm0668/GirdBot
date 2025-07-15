@@ -1,20 +1,40 @@
-# 双账户对冲网格策略依赖包
-# 核心策略依赖
-ccxt==4.2.85
-websockets==12.0
-aiohttp==3.9.3
-asyncio==3.4.3
-python-dotenv==1.0.0
+# 核心依赖
+ccxt>=4.0.0
+pandas>=2.0.0
+pandas-ta>=0.3.14b
+numpy>=1.24.0
+asyncio-compat>=0.1.0
 
-# 原有依赖包
-python-binance>=1.0.16
-pandas>=1.5.0
-numpy>=1.21.0
-pydantic>=1.10.0
-loguru>=0.6.0
-redis>=4.3.0
-uvloop>=0.17.0
-psutil>=5.9.0
+# 数值计算
+decimal>=1.70
+
+# 配置管理
+python-dotenv>=1.0.0
+pydantic>=2.0.0
+
+# 日志处理
+structlog>=23.0.0
+rich>=13.0.0
+
+# HTTP客户端
+aiohttp>=3.8.0
+requests>=2.31.0
+
+# 时间处理
+python-dateutil>=2.8.0
+pytz>=2023.3
+
+# 数据验证
+marshmallow>=3.19.0
+
+# 开发工具
 pytest>=7.0.0
 pytest-asyncio>=0.21.0
-python-dateutil>=2.8.0
+black>=23.0.0
+flake8>=6.0.0
+mypy>=1.0.0
+
+# 可选依赖
+jupyter>=1.0.0
+matplotlib>=3.7.0
+plotly>=5.15.0
