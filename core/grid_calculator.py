@@ -207,24 +207,18 @@ class GridCalculator:
             网格间距
         """
         try:
-            # 基于目标利润率计算最小间距
-            mid_price = (upper_bound + lower_bound) / Decimal("2")
-            min_spacing_for_profit = mid_price * (target_profit_rate + trading_fees * Decimal("2"))
-            
-            # 基于价格范围计算合理间距
-            price_range = upper_bound - lower_bound
-            suggested_spacing = price_range / Decimal("20")  # 假设20个网格层级
-            
-            # 取较大值确保盈利性
-            grid_spacing = max(min_spacing_for_profit, suggested_spacing)
+            # 按照要求的逻辑计算网格间距
+            # 网格间距 ≈ （目标最低毛利润率+交易手续费*2）*价格范围上限
+            grid_spacing = (target_profit_rate + trading_fees * Decimal("2")) * upper_bound
             
             # 四舍五入到合理精度
             grid_spacing = round_to_precision(grid_spacing, 6)
             
             self.logger.debug("网格间距计算完成", extra={
-                'min_spacing_for_profit': str(min_spacing_for_profit),
-                'suggested_spacing': str(suggested_spacing),
-                'final_spacing': str(grid_spacing)
+                'target_profit_rate': str(target_profit_rate),
+                'trading_fees': str(trading_fees),
+                'upper_bound': str(upper_bound),
+                'grid_spacing': str(grid_spacing)
             })
             
             return grid_spacing
@@ -247,14 +241,15 @@ class GridCalculator:
             if grid_spacing <= 0:
                 raise ValueError("网格间距必须大于0")
             
-            # 计算理论层数
+            # 计算理论层数并向下取整
             theoretical_levels = price_range / grid_spacing
+            grid_levels = int(theoretical_levels)  # 向下取整
             
             # 限制在合理范围内
             min_levels = 4
             max_levels = 50
             
-            grid_levels = max(min_levels, min(max_levels, int(theoretical_levels)))
+            grid_levels = max(min_levels, min(max_levels, grid_levels))
             
             self.logger.debug("网格层数计算完成", extra={
                 'price_range': str(price_range),
@@ -286,30 +281,33 @@ class GridCalculator:
             最大安全杠杆倍数
         """
         try:
-            # 基于ATR波动率计算安全杠杆
-            # 假设价格可能偏离当前价格1个ATR
-            price_volatility = atr_result.atr_value / atr_result.current_price
+            # 计算平均入场价格
+            avg_entry_price = (atr_result.upper_bound + atr_result.lower_bound) / Decimal("2")
             
-            # 计算在最坏情况下不被强平的杠杆倍数
-            # 强平条件：保证金率 <= 维持保证金率
-            # 保证金率 = 净值 / 名义价值 = (本金 - 浮亏) / (本金 * 杠杆)
-            # 浮亏 = 本金 * 杠杆 * 价格变动比例
+            # 1. 计算多头理论最大杠杆
+            long_factor = Decimal("1") + mmr - (atr_result.lower_bound / avg_entry_price)
+            max_leverage_long = Decimal("1") / long_factor if long_factor > 0 else Decimal("100")
             
-            # 最大可承受的价格变动比例
-            max_price_change = price_volatility * Decimal("2")  # 2倍ATR波动
+            # 2. 计算空头理论最大杠杆
+            short_factor = (atr_result.upper_bound / avg_entry_price) - Decimal("1") + mmr
+            max_leverage_short = Decimal("1") / short_factor if short_factor > 0 else Decimal("100")
             
-            # 计算安全杠杆：考虑维持保证金率和安全系数
-            safe_leverage_float = safety_factor / (mmr + max_price_change)
-            safe_leverage = max(1, min(100, int(safe_leverage_float)))
+            # 3. 取较保守的杠杆并应用安全系数
+            conservative_leverage = min(max_leverage_long, max_leverage_short)
+            usable_leverage = int(conservative_leverage * safety_factor)
+            usable_leverage = max(1, min(100, usable_leverage))  # 确保在1-100之间
             
             self.logger.debug("最大杠杆计算完成", extra={
-                'price_volatility': str(price_volatility),
-                'max_price_change': str(max_price_change),
-                'safe_leverage_float': str(safe_leverage_float),
-                'safe_leverage': safe_leverage
+                'avg_entry_price': str(avg_entry_price),
+                'long_factor': str(long_factor),
+                'max_leverage_long': str(max_leverage_long),
+                'short_factor': str(short_factor),
+                'max_leverage_short': str(max_leverage_short),
+                'conservative_leverage': str(conservative_leverage),
+                'usable_leverage': usable_leverage
             })
             
-            return safe_leverage
+            return usable_leverage
             
         except Exception as e:
             raise GridParameterError(f"最大杠杆计算失败: {str(e)}")
@@ -333,34 +331,46 @@ class GridCalculator:
             current_price: 当前价格
         
         Returns:
-            单格交易金额
+            单格交易金额 (基础货币数量)
         """
         try:
-            # 计算可用于网格交易的总资金
-            usable_balance = total_balance * Decimal("0.8")  # 保留20%作为缓冲
+            # 1. 计算总投入名义价值
+            # 使用80%的余额作为可用资金，保留20%作为缓冲
+            usable_balance = total_balance * Decimal("0.8")
+            total_nominal_value = usable_balance * leverage
             
-            # 计算总可用交易金额（考虑杠杆）
-            total_trading_amount = usable_balance * leverage
+            # 2. 计算每格分配的名义价值
+            nominal_value_per_grid = total_nominal_value / grid_levels
             
-            # 分配到每个网格
-            amount_per_grid = total_trading_amount / grid_levels
+            # 3. 检查是否满足最小名义价值
+            if nominal_value_per_grid < min_notional:
+                # 如果每格的价值小于交易所限制，调整层数
+                new_num_levels = int(total_nominal_value / min_notional)
+                if new_num_levels > 0:
+                    self.logger.warning(f"调整网格层数以满足最小名义价值要求: {grid_levels} -> {new_num_levels}")
+                    grid_levels = new_num_levels
+                    nominal_value_per_grid = total_nominal_value / grid_levels
+                else:
+                    # 资金过少，使用最小名义价值
+                    nominal_value_per_grid = min_notional
+                    self.logger.warning(f"资金过少，使用最小名义价值: {min_notional}")
             
-            # 确保满足最小名义价值要求
-            min_amount = min_notional / current_price
-            amount_per_grid = max(amount_per_grid, min_amount)
+            # 4. 计算每格下单的基础货币数量
+            quantity_per_grid = nominal_value_per_grid / current_price
             
-            # 四舍五入到合理精度
-            amount_per_grid = round_to_precision(amount_per_grid, 6)
+            # 5. 精度量化处理
+            quantity_per_grid = round_to_precision(quantity_per_grid, 6)
             
             self.logger.debug("单格金额计算完成", extra={
                 'total_balance': str(total_balance),
                 'usable_balance': str(usable_balance),
-                'total_trading_amount': str(total_trading_amount),
-                'amount_per_grid': str(amount_per_grid),
-                'min_amount': str(min_amount)
+                'total_nominal_value': str(total_nominal_value),
+                'nominal_value_per_grid': str(nominal_value_per_grid),
+                'quantity_per_grid': str(quantity_per_grid),
+                'grid_levels': grid_levels
             })
             
-            return amount_per_grid
+            return quantity_per_grid
             
         except Exception as e:
             raise GridParameterError(f"单格金额计算失败: {str(e)}")

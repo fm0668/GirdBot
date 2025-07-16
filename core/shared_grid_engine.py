@@ -255,41 +255,43 @@ class SharedGridEngine:
             long_levels = []
             short_levels = []
             
-            # 计算每边的网格数量
-            levels_per_side = parameters.grid_levels // 2
+            # 计算价格区间
+            price_range = parameters.upper_bound - parameters.lower_bound
             
-            # 计算中心价格
-            center_price = (parameters.upper_bound + parameters.lower_bound) / Decimal("2")
+            # 计算每个网格的价格间隔
+            # 如果网格层数为1，则使用整个价格区间；否则均匀分布
+            grid_spacing = parameters.grid_spacing
             
-            # 生成多头网格层级（买入价格，从中心价格向下）
-            for i in range(levels_per_side):
-                level_price = center_price - (parameters.grid_spacing * (i + 1))
-                if level_price >= parameters.lower_bound:
-                    level = GridLevel(
+            # 在整个价格区间内均匀生成网格价格点
+            for i in range(parameters.grid_levels):
+                # 从下到上均匀分布价格点
+                level_price = parameters.lower_bound + (grid_spacing * i)
+                
+                # 确保价格在上下边界范围内
+                if level_price <= parameters.upper_bound and level_price >= parameters.lower_bound:
+                    # 创建多头网格层级（买入价格）
+                    long_level = GridLevel(
                         level_id=i,
                         price=level_price,
                         amount=parameters.amount_per_grid,
                         side='LONG'
                     )
-                    long_levels.append(level)
-            
-            # 生成空头网格层级（卖出价格，从中心价格向上）
-            for i in range(levels_per_side):
-                level_price = center_price + (parameters.grid_spacing * (i + 1))
-                if level_price <= parameters.upper_bound:
-                    level = GridLevel(
-                        level_id=i + levels_per_side,
+                    long_levels.append(long_level)
+                    
+                    # 创建空头网格层级（卖出价格）- 使用相同价格点
+                    short_level = GridLevel(
+                        level_id=i,
                         price=level_price,
                         amount=parameters.amount_per_grid,
                         side='SHORT'
                     )
-                    short_levels.append(level)
+                    short_levels.append(short_level)
             
             self.logger.debug("网格层级生成完成", extra={
                 'long_levels_count': len(long_levels),
                 'short_levels_count': len(short_levels),
-                'center_price': str(center_price),
-                'grid_spacing': str(parameters.grid_spacing)
+                'price_range': str(price_range),
+                'grid_spacing': str(grid_spacing)
             })
             
             return long_levels, short_levels

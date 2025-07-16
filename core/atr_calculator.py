@@ -9,7 +9,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Optional
 import pandas as pd
-import pandas_ta as ta
+import numpy as np
 import ccxt.async_support as ccxt
 
 from utils.logger import get_logger
@@ -172,7 +172,7 @@ class ATRCalculator:
     
     async def _calculate_atr_with_pandas_ta(self, df: pd.DataFrame, config: ATRConfig) -> ATRResult:
         """
-        使用pandas_ta计算ATR
+        使用pandas内置函数计算ATR
         
         Args:
             df: K线数据
@@ -183,23 +183,16 @@ class ATRCalculator:
         """
         try:
             # 计算True Range
-            tr = ta.true_range(df['high'], df['low'], df['close'])
+            tr = self.calculate_true_range(df)
             
             # 根据平滑方法计算ATR
-            if config.smoothing_method == 'RMA':
-                atr_series = ta.rma(tr, length=config.length)
-            elif config.smoothing_method == 'SMA':
-                atr_series = ta.sma(tr, length=config.length)
-            elif config.smoothing_method == 'EMA':
-                atr_series = ta.ema(tr, length=config.length)
-            elif config.smoothing_method == 'WMA':
-                atr_series = ta.wma(tr, length=config.length)
-            else:
-                raise ATRCalculationError(f"不支持的平滑方法: {config.smoothing_method}")
+            atr_series = self.smooth_atr(tr, config.smoothing_method, config.length)
             
             # 获取最新值
             latest_atr = atr_series.iloc[-1]
             latest_close = df['close'].iloc[-1]
+            latest_high = df['high'].iloc[-1]
+            latest_low = df['low'].iloc[-1]
             
             if pd.isna(latest_atr) or latest_atr <= 0:
                 raise ATRCalculationError("ATR计算结果无效")
@@ -207,11 +200,14 @@ class ATRCalculator:
             # 转换为Decimal
             atr_value = validate_decimal_precision(latest_atr, 8)
             current_price = validate_decimal_precision(latest_close, 8)
+            high_price = validate_decimal_precision(latest_high, 8)
+            low_price = validate_decimal_precision(latest_low, 8)
             
-            # 计算ATR通道
-            channel_half_width = atr_value * config.multiplier
-            upper_bound = current_price + channel_half_width
-            lower_bound = current_price - channel_half_width
+            # 计算ATR通道 - 修改为按照要求的逻辑
+            # 上轨 = high + atr*multiplier (做空网格止损线)
+            # 下轨 = low - atr*multiplier (做多网格止损线)
+            upper_bound = high_price + (atr_value * config.multiplier)
+            lower_bound = low_price - (atr_value * config.multiplier)
             channel_width = upper_bound - lower_bound
             
             return ATRResult(
@@ -237,7 +233,15 @@ class ATRCalculator:
         Returns:
             True Range序列
         """
-        return ta.true_range(df['high'], df['low'], df['close'])
+        # 计算True Range的三个候选值
+        high_low = df['high'] - df['low']
+        high_close_prev = abs(df['high'] - df['close'].shift(1))
+        low_close_prev = abs(df['low'] - df['close'].shift(1))
+        
+        # 取最大值作为True Range
+        tr = pd.concat([high_low, high_close_prev, low_close_prev], axis=1).max(axis=1)
+        
+        return tr
     
     def smooth_atr(self, tr_series: pd.Series, method: str, length: int) -> pd.Series:
         """
@@ -252,13 +256,18 @@ class ATRCalculator:
             平滑后的ATR序列
         """
         if method == 'RMA':
-            return ta.rma(tr_series, length=length)
+            # RMA (Relative Moving Average) = EMA的另一种实现
+            return tr_series.ewm(alpha=1/length, adjust=False).mean()
         elif method == 'SMA':
-            return ta.sma(tr_series, length=length)
+            return tr_series.rolling(window=length).mean()
         elif method == 'EMA':
-            return ta.ema(tr_series, length=length)
+            return tr_series.ewm(span=length, adjust=False).mean()
         elif method == 'WMA':
-            return ta.wma(tr_series, length=length)
+            # 加权移动平均
+            weights = np.arange(1, length + 1)
+            return tr_series.rolling(window=length).apply(
+                lambda x: np.dot(x, weights) / weights.sum(), raw=True
+            )
         else:
             raise ValueError(f"不支持的平滑方法: {method}")
     
