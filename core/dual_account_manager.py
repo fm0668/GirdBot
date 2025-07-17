@@ -181,55 +181,35 @@ class DualAccountManager:
     async def pre_flight_checks(self) -> bool:
         """
         启动前预检查，确保双账户为空仓状态
+        自动清理所有持仓和挂单
         
         Returns:
             是否通过预检查
         """
         try:
-            self.logger.info("开始执行启动前预检查")
+            self.logger.info("开始执行启动前预检查和清理")
             
             # 检查连接状态
             if not self.exchange_a or not self.exchange_b:
                 raise AccountConnectionError("账户连接未建立")
             
-            # 检查账户A状态
-            positions_a = await self.exchange_a.fetch_positions()
-            open_positions_a = [p for p in positions_a if float(p['contracts']) != 0]
+            # 步骤1：检查并清理账户A
+            await self._cleanup_account('A')
             
-            orders_a = await self.exchange_a.fetch_open_orders()
+            # 步骤2：检查并清理账户B
+            await self._cleanup_account('B')
             
-            # 检查账户B状态
-            positions_b = await self.exchange_b.fetch_positions()
-            open_positions_b = [p for p in positions_b if float(p['contracts']) != 0]
+            # 步骤3：再次验证清理结果
+            await self._verify_accounts_clean()
             
-            orders_b = await self.exchange_b.fetch_open_orders()
-            
-            # 验证空仓状态
-            if open_positions_a or open_positions_b:
-                self.logger.error("预检查失败：发现未平仓位", extra={
-                    'account_a_positions': len(open_positions_a),
-                    'account_b_positions': len(open_positions_b)
-                })
-                return False
-            
-            if orders_a or orders_b:
-                self.logger.warning("发现未成交订单，将自动取消", extra={
-                    'account_a_orders': len(orders_a),
-                    'account_b_orders': len(orders_b)
-                })
-                
-                # 自动取消所有订单
-                await self.cancel_all_orders('A')
-                await self.cancel_all_orders('B')
-            
-            # 检查余额
+            # 步骤4：检查余额
             balance_a = await self.get_account_balance('A')
             balance_b = await self.get_account_balance('B')
             
             if balance_a <= 0 or balance_b <= 0:
                 raise InsufficientBalanceError("账户余额不足")
             
-            # 检查余额平衡
+            # 步骤5：检查余额平衡
             if self.config.balance_sync_enabled:
                 await self.balance_accounts()
             
@@ -243,6 +223,142 @@ class DualAccountManager:
         except Exception as e:
             self.logger.error(f"启动前预检查失败: {e}")
             return False
+    
+    async def _cleanup_account(self, account_type: str) -> None:
+        """
+        清理指定账户的所有持仓和挂单
+        
+        Args:
+            account_type: 账户类型 ('A' or 'B')
+        """
+        exchange = self.exchange_a if account_type == 'A' else self.exchange_b
+        if not exchange:
+            return
+        
+        self.logger.info(f"开始清理账户{account_type}")
+        
+        # 设置API选项，避免警告
+        exchange.options = getattr(exchange, 'options', {})
+        exchange.options['warnOnFetchOpenOrdersWithoutSymbol'] = False
+        
+        # 步骤1：检查并平仓所有持仓
+        try:
+            positions = await exchange.fetch_positions()
+            open_positions = [p for p in positions if float(p['contracts']) != 0]
+            
+            if open_positions:
+                self.logger.warning(f"账户{account_type}发现{len(open_positions)}个持仓，开始平仓")
+                
+                for position in open_positions:
+                    try:
+                        side = 'sell' if float(position['contracts']) > 0 else 'buy'
+                        amount = abs(float(position['contracts']))
+                        
+                        self.logger.info(f"平仓 {position['symbol']}: {side} {amount}")
+                        
+                        await exchange.create_market_order(
+                            position['symbol'], 
+                            side, 
+                            amount,
+                            None,
+                            None,
+                            {'reduceOnly': True}
+                        )
+                        
+                        # 等待1秒避免频率限制
+                        await asyncio.sleep(1)
+                        
+                    except Exception as e:
+                        self.logger.error(f"平仓失败 {position['symbol']}: {e}")
+                        
+                self.logger.info(f"账户{account_type}平仓操作完成")
+            else:
+                self.logger.info(f"账户{account_type}无持仓")
+                
+        except Exception as e:
+            self.logger.error(f"账户{account_type}检查持仓失败: {e}")
+        
+        # 步骤2：检查并取消所有挂单
+        try:
+            # 先尝试获取指定交易对的订单
+            open_orders = []
+            try:
+                trading_pair = self.config.trading_pair
+                orders = await exchange.fetch_open_orders(trading_pair)
+                open_orders.extend(orders)
+            except:
+                pass
+            
+            # 如果没有找到订单，尝试获取所有订单
+            if not open_orders:
+                try:
+                    all_orders = await exchange.fetch_open_orders()
+                    open_orders.extend(all_orders)
+                except:
+                    pass
+            
+            if open_orders:
+                self.logger.warning(f"账户{account_type}发现{len(open_orders)}个挂单，开始取消")
+                
+                for order in open_orders:
+                    try:
+                        self.logger.info(f"取消订单 {order['id']} {order['symbol']}")
+                        await exchange.cancel_order(order['id'], order['symbol'])
+                        
+                        # 等待0.5秒避免频率限制
+                        await asyncio.sleep(0.5)
+                        
+                    except Exception as e:
+                        self.logger.error(f"取消订单失败 {order['id']}: {e}")
+                        
+                self.logger.info(f"账户{account_type}撤单操作完成")
+            else:
+                self.logger.info(f"账户{account_type}无挂单")
+                
+        except Exception as e:
+            self.logger.error(f"账户{account_type}检查挂单失败: {e}")
+        
+        # 等待2秒让所有操作完成
+        await asyncio.sleep(2)
+    
+    async def _verify_accounts_clean(self) -> None:
+        """
+        验证双账户已清理完成
+        """
+        self.logger.info("验证账户清理状态")
+        
+        for account_type in ['A', 'B']:
+            exchange = self.exchange_a if account_type == 'A' else self.exchange_b
+            if not exchange:
+                continue
+            
+            try:
+                # 检查持仓
+                positions = await exchange.fetch_positions()
+                open_positions = [p for p in positions if float(p['contracts']) != 0]
+                
+                if open_positions:
+                    self.logger.warning(f"账户{account_type}仍有{len(open_positions)}个持仓")
+                    for pos in open_positions:
+                        self.logger.warning(f"  持仓: {pos['symbol']} {pos['contracts']}")
+                else:
+                    self.logger.info(f"账户{account_type}持仓已清空 ✓")
+                
+                # 检查挂单
+                try:
+                    orders = await exchange.fetch_open_orders(self.config.trading_pair)
+                except:
+                    orders = await exchange.fetch_open_orders()
+                
+                if orders:
+                    self.logger.warning(f"账户{account_type}仍有{len(orders)}个挂单")
+                    for order in orders:
+                        self.logger.warning(f"  挂单: {order['id']} {order['symbol']}")
+                else:
+                    self.logger.info(f"账户{account_type}挂单已清空 ✓")
+                    
+            except Exception as e:
+                self.logger.error(f"验证账户{account_type}状态失败: {e}")
     
     async def balance_accounts(self) -> bool:
         """
@@ -302,7 +418,26 @@ class DualAccountManager:
             if not exchange:
                 return False
             
-            open_orders = await exchange.fetch_open_orders()
+            # 设置API选项，避免警告
+            exchange.options = getattr(exchange, 'options', {})
+            exchange.options['warnOnFetchOpenOrdersWithoutSymbol'] = False
+            
+            # 先尝试获取指定交易对的订单
+            open_orders = []
+            try:
+                trading_pair = self.config.trading_pair
+                orders = await exchange.fetch_open_orders(trading_pair)
+                open_orders.extend(orders)
+            except:
+                pass
+            
+            # 如果没有找到订单，尝试获取所有订单
+            if not open_orders:
+                try:
+                    all_orders = await exchange.fetch_open_orders()
+                    open_orders.extend(all_orders)
+                except:
+                    pass
             
             if not open_orders:
                 return True
@@ -447,8 +582,22 @@ class DualAccountManager:
         try:
             # 更新账户A状态
             if self.exchange_a:
+                # 设置API选项，避免警告
+                self.exchange_a.options = getattr(self.exchange_a, 'options', {})
+                self.exchange_a.options['warnOnFetchOpenOrdersWithoutSymbol'] = False
+                
                 balance_a = await self.get_account_balance('A')
-                orders_a = await self.exchange_a.fetch_open_orders()
+                
+                # 获取订单
+                orders_a = []
+                try:
+                    orders_a = await self.exchange_a.fetch_open_orders(self.config.trading_pair)
+                except:
+                    try:
+                        orders_a = await self.exchange_a.fetch_open_orders()
+                    except:
+                        pass
+                
                 positions_a = await self.exchange_a.fetch_positions()
                 open_positions_a = [p for p in positions_a if float(p['contracts']) != 0]
                 
@@ -463,8 +612,22 @@ class DualAccountManager:
             
             # 更新账户B状态
             if self.exchange_b:
+                # 设置API选项，避免警告
+                self.exchange_b.options = getattr(self.exchange_b, 'options', {})
+                self.exchange_b.options['warnOnFetchOpenOrdersWithoutSymbol'] = False
+                
                 balance_b = await self.get_account_balance('B')
-                orders_b = await self.exchange_b.fetch_open_orders()
+                
+                # 获取订单
+                orders_b = []
+                try:
+                    orders_b = await self.exchange_b.fetch_open_orders(self.config.trading_pair)
+                except:
+                    try:
+                        orders_b = await self.exchange_b.fetch_open_orders()
+                    except:
+                        pass
+                
                 positions_b = await self.exchange_b.fetch_positions()
                 open_positions_b = [p for p in positions_b if float(p['contracts']) != 0]
                 
