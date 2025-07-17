@@ -12,6 +12,7 @@ from enum import Enum
 
 from .atr_calculator import ATRCalculator, ATRConfig
 from .grid_calculator import GridCalculator, GridParameters
+from .exchange_data_provider import ExchangeDataProvider
 from config.dual_account_config import DualAccountConfig
 from config.grid_executor_config import GridExecutorConfig
 from utils.logger import get_logger
@@ -82,16 +83,18 @@ class SharedGridData:
 
 class SharedGridEngine:
     """共享网格参数引擎"""
-    
-    def __init__(self, exchange, dual_config: DualAccountConfig, executor_config: GridExecutorConfig):
+
+    def __init__(self, exchange, dual_config: DualAccountConfig, executor_config: GridExecutorConfig, account_manager=None):
         self.exchange = exchange
         self.dual_config = dual_config
         self.executor_config = executor_config
+        self.account_manager = account_manager  # 添加账户管理器引用
         self.logger = get_logger(self.__class__.__name__)
-        
+
         # 计算器组件
         self.atr_calculator = ATRCalculator(exchange)
-        self.grid_calculator = GridCalculator()
+        self.data_provider = ExchangeDataProvider(exchange)
+        self.grid_calculator = GridCalculator(self.data_provider)
         
         # 共享数据
         self.grid_data: Optional[SharedGridData] = None
@@ -162,16 +165,14 @@ class SharedGridEngine:
                     config=atr_config
                 )
                 
-                # 模拟获取账户余额（实际实现应该从账户管理器获取）
-                account_balances = {
-                    'A': Decimal("1000"),  # 账户A余额
-                    'B': Decimal("1000")   # 账户B余额
-                }
-                
+                # 获取真实账户余额
+                account_balances = await self._get_real_account_balances()
+
                 # 计算网格参数
                 grid_parameters = await self.grid_calculator.calculate_grid_parameters(
                     atr_result=atr_result,
                     account_balances=account_balances,
+                    symbol=self.dual_config.trading_pair,
                     target_profit_rate=self.executor_config.target_profit_rate,
                     safety_factor=self.executor_config.safety_factor,
                     max_leverage=self.executor_config.leverage
@@ -208,6 +209,45 @@ class SharedGridEngine:
             if self.grid_data:
                 self.grid_data.is_valid = False
             return False
+
+    async def _get_real_account_balances(self) -> Dict[str, Decimal]:
+        """
+        获取真实账户余额
+
+        Returns:
+            账户余额字典
+        """
+        try:
+            if self.account_manager:
+                # 从账户管理器获取真实余额
+                balance_a = await self.account_manager.get_account_balance('A')
+                balance_b = await self.account_manager.get_account_balance('B')
+
+                self.logger.info("获取到真实账户余额", extra={
+                    'account_a_balance': str(balance_a),
+                    'account_b_balance': str(balance_b),
+                    'total_balance': str(balance_a + balance_b)
+                })
+
+                return {
+                    'A': balance_a,
+                    'B': balance_b
+                }
+            else:
+                # 如果没有账户管理器，使用默认值
+                self.logger.warning("未提供账户管理器，使用默认余额")
+                return {
+                    'A': Decimal("1000"),
+                    'B': Decimal("1000")
+                }
+
+        except Exception as e:
+            self.logger.error(f"获取账户余额失败: {e}")
+            # 返回默认值
+            return {
+                'A': Decimal("1000"),
+                'B': Decimal("1000")
+            }
     
     def get_grid_levels_for_account(self, account_type: str) -> List[GridLevel]:
         """

@@ -7,10 +7,11 @@ import asyncio
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Optional
 import math
 
 from .atr_calculator import ATRResult
+from .exchange_data_provider import ExchangeDataProvider
 from utils.logger import get_logger
 from utils.exceptions import GridParameterError
 from utils.helpers import validate_decimal_precision, round_to_precision
@@ -29,6 +30,7 @@ class GridParameters:
     total_balance: Decimal
     usable_leverage: int
     amount_per_grid: Decimal
+    nominal_value_per_grid: Decimal  # 每格名义价值
     
     # 风险控制参数
     stop_loss_upper: Decimal  # 空头止损线
@@ -61,50 +63,79 @@ class GridParameters:
     
     def get_required_margin(self) -> Decimal:
         """获取所需保证金"""
-        return self.get_total_investment() / self.usable_leverage
+        margin = self.get_total_investment() / self.usable_leverage
+        # 格式化到2位小数（美元精度）
+        return margin.quantize(Decimal('0.01'))
 
 
 class GridCalculator:
     """网格参数计算器"""
-    
-    def __init__(self):
+
+    def __init__(self, data_provider: Optional[ExchangeDataProvider] = None):
         self.logger = get_logger(self.__class__.__name__)
+        self.data_provider = data_provider
         self._calculation_lock = asyncio.Lock()
     
     async def calculate_grid_parameters(
         self,
         atr_result: ATRResult,
         account_balances: Dict[str, Decimal],
+        symbol: str,
         target_profit_rate: Decimal = Decimal("0.002"),
         safety_factor: Decimal = Decimal("0.8"),
         max_leverage: int = 10,
-        trading_fees: Decimal = Decimal("0.0004"),
-        min_notional: Decimal = Decimal("5")
+        trading_fees: Optional[Decimal] = None,
+        min_notional: Optional[Decimal] = None,
+        mmr: Optional[Decimal] = None
     ) -> GridParameters:
         """
         计算网格参数
-        
+
         Args:
             atr_result: ATR计算结果
             account_balances: 账户余额字典
+            symbol: 交易对符号
             target_profit_rate: 目标利润率
             safety_factor: 安全系数
             max_leverage: 最大杠杆
-            trading_fees: 交易手续费
-            min_notional: 最小名义价值
-        
+            trading_fees: 交易手续费（可选，从交易所获取）
+            min_notional: 最小名义价值（可选，从交易所获取）
+            mmr: 维持保证金率（可选，从交易所获取）
+
         Returns:
             网格参数
         """
         try:
             async with self._calculation_lock:
+                # 获取交易所数据
+                symbol_info = None
+                if self.data_provider:
+                    try:
+                        symbol_info = await self.data_provider.get_symbol_info(symbol)
+                        self.logger.info("成功获取交易所数据", extra={
+                            'symbol': symbol,
+                            'maker_fee': str(symbol_info.maker_fee),
+                            'maintenance_margin_rate': str(symbol_info.maintenance_margin_rate),
+                            'min_cost': str(symbol_info.min_cost)
+                        })
+                    except Exception as e:
+                        self.logger.warning(f"获取交易所数据失败，使用默认值: {e}")
+
+                # 使用交易所数据或默认值
+                actual_trading_fees = trading_fees or (symbol_info.maker_fee if symbol_info else Decimal("0.0002"))
+                actual_min_notional = min_notional or (symbol_info.min_cost if symbol_info else Decimal("5"))
+                actual_mmr = mmr or (symbol_info.maintenance_margin_rate if symbol_info else Decimal("0.05"))
+
                 self.logger.info("开始计算网格参数", extra={
                     'current_price': str(atr_result.current_price),
                     'atr_value': str(atr_result.atr_value),
                     'channel_width': str(atr_result.channel_width),
-                    'target_profit_rate': str(target_profit_rate)
+                    'target_profit_rate': str(target_profit_rate),
+                    'actual_trading_fees': str(actual_trading_fees),
+                    'actual_min_notional': str(actual_min_notional),
+                    'actual_mmr': str(actual_mmr)
                 })
-                
+
                 # 计算总可用余额
                 total_balance = sum(account_balances.values())
                 if total_balance <= 0:
@@ -112,8 +143,8 @@ class GridCalculator:
                 
                 # 计算安全杠杆倍数
                 safe_leverage = await self.calculate_max_leverage(
-                    atr_result, 
-                    Decimal("0.1"),  # 假设维持保证金率为10%
+                    atr_result,
+                    actual_mmr,  # 使用实际维持保证金率
                     safety_factor
                 )
                 usable_leverage = min(safe_leverage, max_leverage)
@@ -131,7 +162,7 @@ class GridCalculator:
                     atr_result.upper_bound,
                     atr_result.lower_bound,
                     target_profit_rate,
-                    trading_fees
+                    actual_trading_fees
                 )
                 
                 # 计算网格层数
@@ -139,13 +170,17 @@ class GridCalculator:
                 grid_levels = await self.calculate_grid_levels(price_range, grid_spacing)
                 
                 # 计算单格金额
-                amount_per_grid = await self.calculate_amount_per_grid(
-                    total_balance,
+                amount_per_grid, nominal_value_per_grid = await self.calculate_amount_per_grid(
+                    account_balances,
                     usable_leverage,
                     grid_levels,
-                    min_notional,
+                    actual_min_notional,
                     atr_result.current_price
                 )
+
+                # 使用交易所精度格式化金额
+                if symbol_info and self.data_provider:
+                    amount_per_grid = self.data_provider.format_amount(symbol, amount_per_grid)
                 
                 # 计算止损线
                 stop_loss_upper, stop_loss_lower = await self.calculate_stop_loss_levels(
@@ -162,6 +197,7 @@ class GridCalculator:
                     total_balance=total_balance,
                     usable_leverage=usable_leverage,
                     amount_per_grid=amount_per_grid,
+                    nominal_value_per_grid=nominal_value_per_grid,
                     stop_loss_upper=stop_loss_upper,
                     stop_loss_lower=stop_loss_lower,
                     max_drawdown_pct=Decimal("0.15"),  # 默认15%最大回撤
@@ -247,8 +283,8 @@ class GridCalculator:
             
             # 限制在合理范围内
             min_levels = 4
-            max_levels = 50
-            
+            max_levels = 100  # 提升到100层，给予更多灵活性
+
             grid_levels = max(min_levels, min(max_levels, grid_levels))
             
             self.logger.debug("网格层数计算完成", extra={
@@ -297,14 +333,18 @@ class GridCalculator:
             usable_leverage = int(conservative_leverage * safety_factor)
             usable_leverage = max(1, min(100, usable_leverage))  # 确保在1-100之间
             
-            self.logger.debug("最大杠杆计算完成", extra={
+            self.logger.info("杠杆计算详情", extra={
+                'upper_bound': str(atr_result.upper_bound),
+                'lower_bound': str(atr_result.lower_bound),
                 'avg_entry_price': str(avg_entry_price),
+                'mmr': f"{mmr*100:.3f}%",
+                'safety_factor': str(safety_factor),
                 'long_factor': str(long_factor),
-                'max_leverage_long': str(max_leverage_long),
+                'max_leverage_long': f"{max_leverage_long:.2f}x",
                 'short_factor': str(short_factor),
-                'max_leverage_short': str(max_leverage_short),
-                'conservative_leverage': str(conservative_leverage),
-                'usable_leverage': usable_leverage
+                'max_leverage_short': f"{max_leverage_short:.2f}x",
+                'conservative_leverage': f"{conservative_leverage:.2f}x",
+                'usable_leverage': f"{usable_leverage}x"
             })
             
             return usable_leverage
@@ -314,7 +354,7 @@ class GridCalculator:
     
     async def calculate_amount_per_grid(
         self,
-        total_balance: Decimal,
+        account_balances: Dict[str, Decimal],
         leverage: int,
         grid_levels: int,
         min_notional: Decimal,
@@ -322,22 +362,33 @@ class GridCalculator:
     ) -> Decimal:
         """
         计算单格交易金额
-        
+
         Args:
-            total_balance: 总余额
+            account_balances: 账户余额字典 {'A': balance_a, 'B': balance_b}
             leverage: 杠杆倍数
             grid_levels: 网格层数
             min_notional: 最小名义价值
             current_price: 当前价格
-        
+
         Returns:
-            单格交易金额 (基础货币数量)
+            (单格交易金额, 每格名义价值) 元组
         """
         try:
-            # 1. 计算总投入名义价值
-            # 使用80%的余额作为可用资金，保留20%作为缓冲
-            usable_balance = total_balance * Decimal("0.8")
+            # 1. 使用两个账户中最少的可用金额
+            min_balance = min(account_balances.values())
+
+            # 使用90%的最小余额作为可用资金，保留10%作为缓冲
+            usable_balance = min_balance * Decimal("0.9")
             total_nominal_value = usable_balance * leverage
+
+            self.logger.info("单格金额计算基础数据", extra={
+                'account_a_balance': str(account_balances.get('A', 0)),
+                'account_b_balance': str(account_balances.get('B', 0)),
+                'min_balance': str(min_balance),
+                'usable_balance': str(usable_balance),
+                'leverage': leverage,
+                'total_nominal_value': str(total_nominal_value)
+            })
             
             # 2. 计算每格分配的名义价值
             nominal_value_per_grid = total_nominal_value / grid_levels
@@ -360,9 +411,16 @@ class GridCalculator:
             
             # 5. 精度量化处理
             quantity_per_grid = round_to_precision(quantity_per_grid, 6)
-            
-            self.logger.debug("单格金额计算完成", extra={
-                'total_balance': str(total_balance),
+
+            self.logger.info("单格金额计算完成", extra={
+                'nominal_value_per_grid': f"${nominal_value_per_grid:.2f}",
+                'quantity_per_grid': f"{quantity_per_grid} DOGE",
+                'grid_levels': grid_levels,
+                'current_price': f"${current_price}"
+            })
+
+            self.logger.debug("单格金额计算详情", extra={
+                'min_balance': str(min_balance),
                 'usable_balance': str(usable_balance),
                 'total_nominal_value': str(total_nominal_value),
                 'nominal_value_per_grid': str(nominal_value_per_grid),
@@ -370,7 +428,7 @@ class GridCalculator:
                 'grid_levels': grid_levels
             })
             
-            return quantity_per_grid
+            return quantity_per_grid, nominal_value_per_grid
             
         except Exception as e:
             raise GridParameterError(f"单格金额计算失败: {str(e)}")
@@ -396,9 +454,13 @@ class GridCalculator:
             
             # 空头止损线（价格向上突破时止损）
             stop_loss_upper = atr_result.upper_bound + stop_distance
-            
+
             # 多头止损线（价格向下突破时止损）
             stop_loss_lower = atr_result.lower_bound - stop_distance
+
+            # 格式化到合理精度（5位小数，符合币安DOGEUSDC精度）
+            stop_loss_upper = stop_loss_upper.quantize(Decimal('0.00001'))
+            stop_loss_lower = stop_loss_lower.quantize(Decimal('0.00001'))
             
             self.logger.debug("止损线计算完成", extra={
                 'stop_distance': str(stop_distance),
