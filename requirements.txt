@@ -1,27 +1,31 @@
-# 核心依赖
+# 双账户对冲网格执行器依赖包
+
+# 核心数据处理
+pandas>=1.5.0
+numpy>=1.21.0
+
+# 交易所连接
 ccxt>=4.0.0
-pandas>=2.0.0
-numpy>=1.24.0
 
-# 配置管理
-python-dotenv>=1.0.0
-pydantic>=2.0.0
-
-# 日志处理
-structlog>=23.0.0
-rich>=13.0.0
-
-# HTTP客户端
-aiohttp>=3.8.0
-requests>=2.31.0
-
-# 时间处理
-python-dateutil>=2.8.0
-pytz>=2023.3
+# WebSocket连接 (增强版客户端)
+websockets>=11.0.0
 
 # 数据验证
-marshmallow>=3.19.0
+pydantic>=2.0.0
 
-# 开发工具
+# 环境变量管理
+python-dotenv>=1.0.0
+
+# 开发和测试依赖 (可选)
 pytest>=7.0.0
 pytest-asyncio>=0.21.0
+pytest-mock>=3.10.0
+
+# 代码质量 (可选)
+black>=23.0.0
+flake8>=6.0.0
+mypy>=1.0.0
+
+# 文档生成 (可选)
+sphinx>=6.0.0
+sphinx-rtd-theme>=1.2.0
