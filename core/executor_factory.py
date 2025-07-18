@@ -3,307 +3,171 @@
 目的：根据配置创建合适的执行器实例，支持单账户和双账户模式
 """
 
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Union
 import copy
+from decimal import Decimal
+import ccxt.async_support as ccxt
 
 from .hedge_grid_executor import HedgeGridExecutor
 from .long_account_executor import LongAccountExecutor
 from .short_account_executor import ShortAccountExecutor
 from .sync_controller import SyncController
 from .shared_grid_engine import SharedGridEngine
-from config.grid_executor_config import GridExecutorConfig, AccountMode
+from config.grid_executor_config import GridExecutorConfig
 from utils.logger import get_logger
 from utils.exceptions import ConfigurationError
 
 
 class ExecutorFactory:
-    """执行器工厂类"""
-    
+    """
+    执行器工厂 - 支持单账号和双账号模式
+    """
+
     @staticmethod
-    def create_executors(
-        exchange_a,
-        exchange_b,
-        config: GridExecutorConfig,
-        grid_engine: SharedGridEngine
-    ) -> Tuple[List[HedgeGridExecutor], Optional[SyncController]]:
+    def create_executors(config: GridExecutorConfig,
+                        exchange_a: Optional[ccxt.Exchange] = None,
+                        exchange_b: Optional[ccxt.Exchange] = None) -> Tuple[List[HedgeGridExecutor], Optional[SyncController]]:
         """
         根据配置创建执行器
-        
+
         Args:
-            exchange_a: 交易所A连接
-            exchange_b: 交易所B连接
-            config: 执行器配置
-            grid_engine: 共享网格引擎
-        
+            config: 网格执行器配置
+            exchange_a: 交易所A（可选）
+            exchange_b: 交易所B（可选）
+
         Returns:
             (执行器列表, 同步控制器)
         """
         logger = get_logger("ExecutorFactory")
-        
+
         try:
-            if config.account_mode == AccountMode.SINGLE:
-                # 单账户模式
-                executor = ExecutorFactory.create_single_account_strategy(
-                    exchange_a, config, grid_engine
-                )
-                logger.info("创建单账户执行器成功")
-                return [executor], None
+            account_mode = getattr(config, 'account_mode', 'SINGLE')
+
+            if account_mode == 'SINGLE':
+                # 单账号模式：只创建多头执行器
+                long_executor = LongAccountExecutor(config, exchange_a)
+                logger.info("创建单账号执行器成功")
+                return [long_executor], None
                 
-            elif config.account_mode == AccountMode.DUAL:
-                # 双账户模式
-                long_executor, short_executor, sync_controller = ExecutorFactory.create_dual_account_strategy(
-                    exchange_a, exchange_b, config, grid_engine
-                )
-                logger.info("创建双账户执行器成功")
+            elif account_mode == 'DUAL':
+                # 双账号模式：创建双执行器和同步控制器
+                # 为长短账户创建独立配置
+                long_config = copy.deepcopy(config)
+                short_config = copy.deepcopy(config)
+
+                # 为不同账户设置不同的挂单策略
+                # 多头账户偏重下方挂单，空头账户偏重上方挂单
+                if hasattr(long_config, 'upper_lower_ratio'):
+                    long_config.upper_lower_ratio = Decimal("0.3")   # 多头：上方30%，下方70%
+                if hasattr(short_config, 'upper_lower_ratio'):
+                    short_config.upper_lower_ratio = Decimal("0.7")  # 空头：上方70%，下方30%
+
+                long_executor = LongAccountExecutor(long_config, exchange_a)
+                short_executor = ShortAccountExecutor(short_config, exchange_b)
+                sync_controller = SyncController(long_executor, short_executor)
+
+                logger.info("创建双账号执行器成功")
                 return [long_executor, short_executor], sync_controller
-                
+
             else:
-                raise ConfigurationError(f"不支持的账户模式: {config.account_mode}")
-                
+                raise ConfigurationError(f"不支持的账户模式: {account_mode}")
+
         except Exception as e:
-            logger.error(f"执行器创建失败: {e}")
+            logger.error(f"创建执行器失败: {e}")
             raise ConfigurationError(f"执行器创建失败: {str(e)}")
     
     @staticmethod
-    def create_single_account_strategy(
-        exchange,
-        config: GridExecutorConfig,
-        grid_engine: SharedGridEngine
-    ) -> LongAccountExecutor:
-        """
-        创建单账户策略（仅多头执行器）
-        
-        Args:
-            exchange: 交易所连接
-            config: 执行器配置
-            grid_engine: 共享网格引擎
-        
-        Returns:
-            多头执行器
-        """
-        logger = get_logger("ExecutorFactory")
-        
-        try:
-            # 创建多头配置
-            long_config = config.create_long_config()
-            
-            # 创建多头执行器
-            long_executor = LongAccountExecutor(
-                exchange=exchange,
-                config=long_config,
-                grid_engine=grid_engine,
-                account_type="LONG"
-            )
-            
-            logger.info("单账户策略创建成功", extra={
-                'trading_pair': config.trading_pair,
-                'max_open_orders': config.max_open_orders,
-                'leverage': config.leverage
-            })
-            
-            return long_executor
-            
-        except Exception as e:
-            logger.error(f"单账户策略创建失败: {e}")
-            raise ConfigurationError(f"单账户策略创建失败: {str(e)}")
-    
-    @staticmethod
-    def create_dual_account_strategy(
-        exchange_a,
-        exchange_b,
-        config: GridExecutorConfig,
-        grid_engine: SharedGridEngine
-    ) -> Tuple[LongAccountExecutor, ShortAccountExecutor, SyncController]:
-        """
-        创建双账户策略（多头+空头执行器+同步控制器）
-        
-        Args:
-            exchange_a: 交易所A连接（多头账户）
-            exchange_b: 交易所B连接（空头账户）
-            config: 执行器配置
-            grid_engine: 共享网格引擎
-        
-        Returns:
-            (多头执行器, 空头执行器, 同步控制器)
-        """
-        logger = get_logger("ExecutorFactory")
-        
-        try:
-            # 创建多头和空头配置
-            long_config = config.create_long_config()
-            short_config = config.create_short_config()
-            
-            # 创建多头执行器
-            long_executor = LongAccountExecutor(
-                exchange=exchange_a,
-                config=long_config,
-                grid_engine=grid_engine,
-                account_type="LONG"
-            )
-            
-            # 创建空头执行器
-            short_executor = ShortAccountExecutor(
-                exchange=exchange_b,
-                config=short_config,
-                grid_engine=grid_engine,
-                account_type="SHORT"
-            )
-            
-            # 创建同步控制器
-            sync_controller = SyncController(
-                long_executor=long_executor,
-                short_executor=short_executor,
-                config=config
-            )
-            
-            logger.info("双账户策略创建成功", extra={
-                'trading_pair': config.trading_pair,
-                'max_open_orders': config.max_open_orders,
-                'leverage': config.leverage,
-                'hedge_sync_enabled': config.hedge_sync_enabled
-            })
-            
-            return long_executor, short_executor, sync_controller
-            
-        except Exception as e:
-            logger.error(f"双账户策略创建失败: {e}")
-            raise ConfigurationError(f"双账户策略创建失败: {str(e)}")
-    
-    @staticmethod
-    def validate_executor_config(config: GridExecutorConfig) -> List[str]:
-        """
-        验证执行器配置
-        
-        Args:
-            config: 执行器配置
-        
-        Returns:
-            错误信息列表
-        """
-        errors = []
-        
-        # 使用配置自身的验证方法
-        config_errors = config.validate_parameters()
-        errors.extend(config_errors)
-        
-        # 额外的工厂级验证
-        if config.account_mode == AccountMode.DUAL:
-            if not config.hedge_sync_enabled:
-                errors.append("双账户模式必须启用对冲同步")
-            
-            if config.risk_check_interval <= 0:
-                errors.append("双账户模式必须设置有效的风险检查间隔")
-        
-        return errors
-    
-    @staticmethod
-    def create_test_executor(
-        exchange,
-        trading_pair: str,
-        account_type: str = "LONG",
-        test_config: dict = None
-    ) -> HedgeGridExecutor:
-        """
-        创建测试用执行器
-        
-        Args:
-            exchange: 交易所连接
-            trading_pair: 交易对
-            account_type: 账户类型
-            test_config: 测试配置
-        
-        Returns:
-            测试执行器
-        """
-        logger = get_logger("ExecutorFactory")
-        
-        try:
-            # 创建基础测试配置
-            config = GridExecutorConfig(
-                connector_name="binance",
-                trading_pair=trading_pair,
-                account_mode=AccountMode.SINGLE,
-                max_open_orders=2,
-                order_frequency=5.0,
-                leverage=1
-            )
-            
-            # 应用测试配置覆盖
-            if test_config:
-                for key, value in test_config.items():
-                    if hasattr(config, key):
-                        setattr(config, key, value)
-            
-            # 创建简化的网格引擎（测试用）
-            # 注意：这里需要实际的网格引擎实现
-            grid_engine = None  # 在实际测试中需要mock或简化版本
-            
-            # 根据账户类型创建执行器
-            if account_type.upper() == "LONG":
-                executor = LongAccountExecutor(
-                    exchange=exchange,
-                    config=config,
-                    grid_engine=grid_engine,
-                    account_type="LONG"
-                )
-            elif account_type.upper() == "SHORT":
-                executor = ShortAccountExecutor(
-                    exchange=exchange,
-                    config=config,
-                    grid_engine=grid_engine,
-                    account_type="SHORT"
-                )
-            else:
-                raise ValueError(f"无效的账户类型: {account_type}")
-            
-            logger.info("测试执行器创建成功", extra={
-                'account_type': account_type,
-                'trading_pair': trading_pair
-            })
-            
-            return executor
-            
-        except Exception as e:
-            logger.error(f"测试执行器创建失败: {e}")
-            raise ConfigurationError(f"测试执行器创建失败: {str(e)}")
-    
-    @staticmethod
-    def get_supported_account_modes() -> List[str]:
-        """
-        获取支持的账户模式列表
-        
-        Returns:
-            账户模式列表
-        """
-        return [mode.value for mode in AccountMode]
-    
-    @staticmethod
-    def get_executor_requirements(account_mode: AccountMode) -> dict:
-        """
-        获取指定账户模式的执行器要求
-        
-        Args:
-            account_mode: 账户模式
-        
-        Returns:
-            要求字典
-        """
-        if account_mode == AccountMode.SINGLE:
-            return {
-                'exchanges_required': 1,
-                'executors_created': 1,
-                'sync_controller_required': False,
-                'min_balance_per_account': 100,  # USDT
-                'recommended_leverage': 5
-            }
-        elif account_mode == AccountMode.DUAL:
-            return {
-                'exchanges_required': 2,
-                'executors_created': 2,
-                'sync_controller_required': True,
-                'min_balance_per_account': 500,  # USDT
-                'recommended_leverage': 3,
-                'balance_sync_required': True
-            }
+    def create_grid_strategy(config: GridExecutorConfig,
+                           grid_engine: SharedGridEngine,
+                           exchange_a: Optional[ccxt.Exchange] = None,
+                           exchange_b: Optional[ccxt.Exchange] = None) -> Union['SingleAccountGridStrategy', 'DualAccountHedgeStrategy']:
+        """创建网格策略"""
+        executors, sync_controller = ExecutorFactory.create_executors(config, exchange_a, exchange_b)
+
+        account_mode = getattr(config, 'account_mode', 'SINGLE')
+
+        if account_mode == 'SINGLE':
+            # 单账号模式
+            long_executor = executors[0]
+            long_executor.set_shared_grid_engine(grid_engine)
+            return SingleAccountGridStrategy(long_executor, grid_engine)
         else:
-            return {}
+            # 双账号模式
+            long_executor, short_executor = executors
+            sync_controller.set_shared_grid_engine(grid_engine)
+            return DualAccountHedgeStrategy(long_executor, short_executor, sync_controller, grid_engine)
+    
+
+class SingleAccountGridStrategy:
+    """单账户网格策略"""
+
+    def __init__(self, executor: LongAccountExecutor, grid_engine: SharedGridEngine):
+        self.executor = executor
+        self.grid_engine = grid_engine
+        self.logger = get_logger(self.__class__.__name__)
+
+    async def start(self):
+        """启动策略"""
+        await self.grid_engine.initialize_grid_parameters()
+        await self.executor.start()
+        self.logger.info("单账户网格策略已启动")
+
+    async def stop(self):
+        """停止策略"""
+        await self.executor.stop()
+        self.logger.info("单账户网格策略已停止")
+
+
+class DualAccountHedgeStrategy:
+    """双账户对冲策略"""
+
+    def __init__(self, long_executor: LongAccountExecutor,
+                 short_executor: ShortAccountExecutor,
+                 sync_controller: SyncController,
+                 grid_engine: SharedGridEngine):
+        self.long_executor = long_executor
+        self.short_executor = short_executor
+        self.sync_controller = sync_controller
+        self.grid_engine = grid_engine
+        self.logger = get_logger(self.__class__.__name__)
+
+    async def start(self):
+        """启动策略"""
+        await self.sync_controller.start_hedge_strategy()
+        self.logger.info("双账户对冲策略已启动")
+
+    async def stop(self):
+        """停止策略"""
+        await self.sync_controller.stop_hedge_strategy()
+        self.logger.info("双账户对冲策略已停止")
+
+
+# 工厂辅助方法
+def validate_executor_config(config: GridExecutorConfig) -> List[str]:
+    """
+    验证执行器配置
+
+    Args:
+        config: 执行器配置
+
+    Returns:
+        错误信息列表
+    """
+    errors = []
+
+    # 基础验证
+    if not hasattr(config, 'trading_pair') or not config.trading_pair:
+        errors.append("交易对不能为空")
+
+    if not hasattr(config, 'max_open_orders') or config.max_open_orders <= 0:
+        errors.append("最大挂单数必须大于0")
+
+    if not hasattr(config, 'order_frequency') or config.order_frequency <= 0:
+        errors.append("订单频率必须大于0")
+
+    return errors
+
+
+def get_supported_account_modes() -> List[str]:
+    """获取支持的账户模式列表"""
+    return ['SINGLE', 'DUAL']

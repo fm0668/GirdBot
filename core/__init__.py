@@ -12,11 +12,11 @@ from .grid_calculator import GridCalculator, GridParameters
 from .shared_grid_engine import SharedGridEngine, GridLevel, SharedGridData
 
 # 执行器架构层
-from .hedge_grid_executor import HedgeGridExecutor, GridLevelStates, RunnableStatus, TrackedOrder
+from .hedge_grid_executor import HedgeGridExecutor, GridLevelStates, RunnableStatus, TrackedOrder, OrderCandidate
 from .long_account_executor import LongAccountExecutor
 from .short_account_executor import ShortAccountExecutor
-from .executor_factory import ExecutorFactory
-from .sync_controller import SyncController, SyncStatus
+from .executor_factory import ExecutorFactory, SingleAccountGridStrategy, DualAccountHedgeStrategy
+from .sync_controller import SyncController, SyncStatus, SyncMetrics
 
 # 监控管理层
 from .hedge_monitor import HedgeMonitor, MonitorMetrics
@@ -41,13 +41,17 @@ __all__ = [
     # 执行器架构层
     "HedgeGridExecutor",
     "GridLevelStates",
-    "RunnableStatus", 
+    "RunnableStatus",
     "TrackedOrder",
+    "OrderCandidate",
     "LongAccountExecutor",
     "ShortAccountExecutor",
     "ExecutorFactory",
+    "SingleAccountGridStrategy",
+    "DualAccountHedgeStrategy",
     "SyncController",
     "SyncStatus",
+    "SyncMetrics",
     
     # 监控管理层
     "HedgeMonitor",

@@ -6,8 +6,11 @@
 from decimal import Decimal
 from typing import Optional
 from datetime import datetime
+import ccxt.async_support as ccxt
 
 from .hedge_grid_executor import HedgeGridExecutor, TrackedOrder, OrderCandidate, GridLevel
+from .shared_grid_engine import SharedGridEngine
+from config.grid_executor_config import GridExecutorConfig
 from utils.logger import get_logger
 from utils.exceptions import OrderPlacementError
 
@@ -15,13 +18,27 @@ from utils.exceptions import OrderPlacementError
 class LongAccountExecutor(HedgeGridExecutor):
     """多头账户执行器 - 专注于买入开仓、卖出平仓逻辑"""
     
-    def __init__(self, exchange, config, grid_engine, account_type="LONG"):
-        super().__init__(exchange, config, grid_engine, account_type)
+    def __init__(self, config: GridExecutorConfig, exchange: Optional[ccxt.Exchange] = None):
+        """
+        初始化多头执行器
+        
+        Args:
+            config: 网格配置参数
+            exchange: 交易所接口（可选，用于实际交易）
+        """
+        # 多头执行器始终使用LONG账户类型
+        super().__init__('LONG', config)
+        
+        self.exchange = exchange
         self.logger = get_logger(f"{self.__class__.__name__}")
+    
+    def set_shared_grid_engine(self, grid_engine: SharedGridEngine):
+        """设置共享网格引擎"""
+        self.shared_grid_engine = grid_engine
     
     async def _place_open_order(self, level: GridLevel) -> Optional[TrackedOrder]:
         """
-        执行买入开仓订单
+        多头开仓：下买单
         
         Args:
             level: 网格层级
@@ -36,23 +53,18 @@ class LongAccountExecutor(HedgeGridExecutor):
             if not order_candidate.validate():
                 raise OrderPlacementError("买入订单参数无效")
             
-            # 执行下单
-            order_result = await self.exchange.create_order(
-                symbol=order_candidate.trading_pair,
-                type=order_candidate.order_type.lower(),
-                side=order_candidate.side.lower(),
-                amount=float(order_candidate.amount),
-                price=float(order_candidate.price),
-                params={
-                    'positionSide': 'LONG',  # 永续合约多头方向
-                    'timeInForce': 'GTC'     # Good Till Canceled
-                }
-            )
+            # 如果有交易所接口，执行实际下单
+            if self.exchange:
+                order_result = await self._execute_buy_order(order_candidate)
+                order_id = order_result['id']
+            else:
+                # 模拟订单ID
+                order_id = f"LONG_BUY_{level.level_id}_{datetime.utcnow().timestamp()}"
             
             # 创建跟踪订单
             tracked_order = TrackedOrder(
-                order_id=order_result['id'],
-                level_id=level.level_id,
+                order_id=order_id,
+                level_id=str(level.level_id),
                 side='BUY',
                 amount=order_candidate.amount,
                 price=order_candidate.price,
@@ -60,22 +72,16 @@ class LongAccountExecutor(HedgeGridExecutor):
                 created_timestamp=datetime.utcnow()
             )
             
-            self.logger.info(f"买入开仓订单创建成功", extra={
-                'order_id': tracked_order.order_id,
-                'level_id': level.level_id,
-                'price': str(order_candidate.price),
-                'amount': str(order_candidate.amount)
-            })
-            
+            self.logger.info(f"多头开仓订单已下: {order_id}, 价格: {order_candidate.price}, 数量: {order_candidate.amount}")
             return tracked_order
             
         except Exception as e:
-            self.logger.error(f"买入开仓订单创建失败: {e}")
-            raise OrderPlacementError(f"买入开仓失败: {str(e)}")
+            self.logger.error(f"多头开仓订单失败: {e}")
+            return None
     
     async def _place_close_order(self, level: GridLevel) -> Optional[TrackedOrder]:
         """
-        执行卖出平仓订单
+        多头平仓：下卖单止盈
         
         Args:
             level: 网格层级
@@ -84,33 +90,28 @@ class LongAccountExecutor(HedgeGridExecutor):
             跟踪订单或None
         """
         try:
-            # 计算平仓目标价格
-            target_price = self._calculate_target_price_for_close(level)
+            # 计算止盈价格
+            entry_price = level.price
+            take_profit_price = self._calculate_take_profit_price(entry_price)
             
             # 创建卖出订单候选
-            order_candidate = self._create_sell_order_candidate(level, target_price, level.amount)
+            order_candidate = self._create_sell_order_candidate(level, take_profit_price, level.amount)
             
             if not order_candidate.validate():
                 raise OrderPlacementError("卖出订单参数无效")
             
-            # 执行下单
-            order_result = await self.exchange.create_order(
-                symbol=order_candidate.trading_pair,
-                type=order_candidate.order_type.lower(),
-                side=order_candidate.side.lower(),
-                amount=float(order_candidate.amount),
-                price=float(order_candidate.price),
-                params={
-                    'positionSide': 'LONG',   # 永续合约多头方向
-                    'reduceOnly': True,       # 只平仓，不开新仓
-                    'timeInForce': 'GTC'      # Good Till Canceled
-                }
-            )
+            # 如果有交易所接口，执行实际下单
+            if self.exchange:
+                order_result = await self._execute_sell_order(order_candidate)
+                order_id = order_result['id']
+            else:
+                # 模拟订单ID
+                order_id = f"LONG_SELL_{level.level_id}_{datetime.utcnow().timestamp()}"
             
             # 创建跟踪订单
             tracked_order = TrackedOrder(
-                order_id=order_result['id'],
-                level_id=level.level_id,
+                order_id=order_id,
+                level_id=str(level.level_id),
                 side='SELL',
                 amount=order_candidate.amount,
                 price=order_candidate.price,
@@ -118,26 +119,18 @@ class LongAccountExecutor(HedgeGridExecutor):
                 created_timestamp=datetime.utcnow()
             )
             
-            self.logger.info(f"卖出平仓订单创建成功", extra={
-                'order_id': tracked_order.order_id,
-                'level_id': level.level_id,
-                'price': str(order_candidate.price),
-                'amount': str(order_candidate.amount)
-            })
-            
+            self.logger.info(f"多头平仓订单已下: {order_id}, 价格: {order_candidate.price}, 数量: {order_candidate.amount}")
             return tracked_order
             
         except Exception as e:
-            self.logger.error(f"卖出平仓订单创建失败: {e}")
-            raise OrderPlacementError(f"卖出平仓失败: {str(e)}")
+            self.logger.error(f"多头平仓订单失败: {e}")
+            return None
     
     def _should_place_order_at_level(self, level: GridLevel, current_price: Decimal) -> bool:
         """
-        判断多头是否应该在指定层级挂单
-        
-        多头策略：
-        - 当前价格高于网格价格时，挂买入单（逢低买入）
-        - 考虑安全边界，避免过于激进的挂单
+        多头挂单策略：上下方都可以挂买单
+        - 下方买单：等待价格下跌后买入（主要策略）
+        - 上方买单：等待价格回调后买入（辅助策略）
         
         Args:
             level: 网格层级
@@ -146,160 +139,80 @@ class LongAccountExecutor(HedgeGridExecutor):
         Returns:
             是否应该挂单
         """
-        try:
-            # 多头策略：价格回落到网格层级以下时买入
-            price_diff = current_price - level.price
-            price_diff_pct = price_diff / current_price
-            
-            # 设置挂单条件
-            min_diff_pct = Decimal("0.001")  # 最小价差百分比 0.1%
-            
-            # 当前价格需要高于网格价格一定幅度才挂买入单
-            should_place = price_diff_pct >= min_diff_pct
-            
-            self.logger.debug(f"多头挂单判断", extra={
-                'level_id': level.level_id,
-                'level_price': str(level.price),
-                'current_price': str(current_price),
-                'price_diff_pct': str(price_diff_pct),
-                'should_place': should_place
-            })
-            
-            return should_place
-            
-        except Exception as e:
-            self.logger.error(f"多头挂单判断失败: {e}")
-            return False
-    
-    def _get_order_side_for_level(self, level: GridLevel, is_open: bool) -> str:
-        """
-        获取多头订单方向
+        # 检查激活范围
+        if self.activation_bounds:
+            distance_pct = abs(level.price - current_price) / current_price
+            if distance_pct > self.activation_bounds:
+                return False
         
-        Args:
-            level: 网格层级
-            is_open: 是否为开仓操作
-        
-        Returns:
-            订单方向
-        """
-        if is_open:
-            return 'BUY'   # 多头开仓：买入
-        else:
-            return 'SELL'  # 多头平仓：卖出
-    
-    def _calculate_target_price_for_close(self, open_level: GridLevel) -> Decimal:
-        """
-        计算多头平仓目标价格
-        
-        Args:
-            open_level: 开仓的网格层级
-        
-        Returns:
-            平仓目标价格
-        """
-        try:
-            # 获取当前网格参数
-            parameters = self.grid_engine.get_current_parameters()
-            if not parameters:
-                raise ValueError("无法获取网格参数")
-            
-            # 计算目标利润
-            target_profit_amount = open_level.price * self.config.target_profit_rate
-            
-            # 计算平仓价格：开仓价 + 目标利润 + 手续费缓冲
-            fee_buffer = open_level.price * self.config.safe_extra_spread
-            target_price = open_level.price + target_profit_amount + fee_buffer
-            
-            # 确保不超过网格上边界
-            if target_price > parameters.upper_bound:
-                target_price = parameters.upper_bound * Decimal("0.995")  # 留5‰的缓冲
-            
-            self.logger.debug(f"多头平仓价格计算", extra={
-                'open_price': str(open_level.price),
-                'target_profit': str(target_profit_amount),
-                'fee_buffer': str(fee_buffer),
-                'target_price': str(target_price)
-            })
-            
-            return target_price
-            
-        except Exception as e:
-            self.logger.error(f"计算多头平仓价格失败: {e}")
-            # 返回保守的平仓价格
-            return open_level.price * Decimal("1.002")  # 0.2%利润
+        # 多头策略：上下方都可以挂买单
+        return True
     
     def _create_buy_order_candidate(self, level: GridLevel) -> OrderCandidate:
-        """
-        创建买入订单候选
-        
-        Args:
-            level: 网格层级
-        
-        Returns:
-            买入订单候选
-        """
+        """创建买单候选"""
+        entry_price = level.price
+
+        # 多头策略：直接使用网格价格挂限价买单
+        # 不需要调整价格，让市场价格触及网格价格时成交
+
         return OrderCandidate(
             trading_pair=self.config.trading_pair,
+            order_type='LIMIT',
             side='BUY',
-            order_type=self.config.open_order_type.value,
             amount=level.amount,
-            price=level.price,
-            level_id=level.level_id,
-            reduce_only=False
+            price=entry_price,
+            is_maker=True
         )
     
-    def _create_sell_order_candidate(
-        self, 
-        level: GridLevel, 
-        price: Decimal, 
-        amount: Decimal
-    ) -> OrderCandidate:
-        """
-        创建卖出订单候选
-        
-        Args:
-            level: 网格层级
-            price: 卖出价格
-            amount: 卖出数量
-        
-        Returns:
-            卖出订单候选
-        """
+    def _create_sell_order_candidate(self, level: GridLevel, price: Decimal, amount: Decimal) -> OrderCandidate:
+        """创建卖单候选"""
         return OrderCandidate(
             trading_pair=self.config.trading_pair,
+            order_type='LIMIT',
             side='SELL',
-            order_type=self.config.close_order_type.value,
             amount=amount,
             price=price,
-            level_id=level.level_id,
-            reduce_only=True
+            is_maker=True
         )
     
-    def get_long_status(self) -> dict:
-        """
-        获取多头执行器专有状态
-        
-        Returns:
-            多头状态字典
-        """
-        status = self.get_status()
-        
-        # 添加多头特有信息
-        long_specific = {
-            'strategy_type': 'LONG_GRID',
-            'buy_levels_count': len([
-                level for level in self._grid_levels 
-                if level.status.value in ['NOT_ACTIVE', 'OPEN_ORDER_PLACED']
-            ]),
-            'sell_levels_count': len([
-                level for level in self._grid_levels 
-                if level.status.value in ['OPEN_ORDER_FILLED', 'CLOSE_ORDER_PLACED']
-            ]),
-            'completed_cycles': len([
-                level for level in self._grid_levels 
-                if level.status.value == 'COMPLETE'
-            ])
-        }
-        
-        status.update(long_specific)
-        return status
+    def _calculate_take_profit_price(self, entry_price: Decimal) -> Decimal:
+        """计算止盈价格"""
+        # 优先使用网格参数中的间距
+        grid_parameters = self.get_grid_parameters()
+        if grid_parameters:
+            # 使用实际计算的网格间距百分比
+            grid_spacing_pct = grid_parameters.grid_spacing / entry_price
+        else:
+            # 回退到配置中的默认值
+            grid_spacing_pct = getattr(self.config, 'grid_spacing_pct', Decimal("0.002"))
+
+        return entry_price * (Decimal("1") + grid_spacing_pct)
+    
+    async def _execute_buy_order(self, order_candidate: OrderCandidate) -> dict:
+        """执行买入订单"""
+        return await self.exchange.create_order(
+            symbol=order_candidate.trading_pair,
+            type=order_candidate.order_type.lower(),
+            side=order_candidate.side.lower(),
+            amount=float(order_candidate.amount),
+            price=float(order_candidate.price),
+            params={
+                'positionSide': 'LONG',  # 永续合约多头方向
+                'timeInForce': 'GTC'     # Good Till Canceled
+            }
+        )
+    
+    async def _execute_sell_order(self, order_candidate: OrderCandidate) -> dict:
+        """执行卖出订单"""
+        return await self.exchange.create_order(
+            symbol=order_candidate.trading_pair,
+            type=order_candidate.order_type.lower(),
+            side=order_candidate.side.lower(),
+            amount=float(order_candidate.amount),
+            price=float(order_candidate.price),
+            params={
+                'positionSide': 'LONG',   # 永续合约多头方向
+                'reduceOnly': True,       # 只平仓，不开新仓
+                'timeInForce': 'GTC'      # Good Till Canceled
+            }
+        )

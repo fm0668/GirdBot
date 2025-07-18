@@ -57,10 +57,14 @@ class GridExecutorConfig:
     atr_length: int = 14
     atr_multiplier: Decimal = Decimal("2.0")
     atr_smoothing: str = "RMA"
-    
+    grid_spacing_pct: Decimal = Decimal("0.002")  # 网格间距百分比（回退值）
+
     # 风险控制参数
     max_drawdown_pct: Decimal = Decimal("0.15")
     min_margin_ratio: Decimal = Decimal("0.2")
+
+    # 新架构特有参数
+    is_single_mode: bool = False  # 是否为单账户模式
     
     @classmethod
     def load_from_env(cls) -> 'GridExecutorConfig':
@@ -70,17 +74,21 @@ class GridExecutorConfig:
         return cls(
             connector_name=os.getenv('EXCHANGE_NAME', 'binance'),
             trading_pair=os.getenv('TRADING_PAIR', ''),
-            account_mode=AccountMode.DUAL,
+            account_mode=os.getenv('ACCOUNT_MODE', 'DUAL'),
             max_open_orders=int(os.getenv('MAX_OPEN_ORDERS', '4')),
+            max_orders_per_batch=int(os.getenv('MAX_ORDERS_PER_BATCH', '2')),
             order_frequency=float(os.getenv('ORDER_FREQUENCY', '3.0')),
+            upper_lower_ratio=Decimal(os.getenv('UPPER_LOWER_RATIO', '0.5')),
             leverage=int(os.getenv('MAX_LEVERAGE', '10')),
             target_profit_rate=Decimal(os.getenv('TARGET_PROFIT_RATE', '0.002')),
             safety_factor=Decimal(os.getenv('SAFETY_FACTOR', '0.8')),
             atr_length=int(os.getenv('ATR_LENGTH', '14')),
             atr_multiplier=Decimal(os.getenv('ATR_MULTIPLIER', '2.0')),
             atr_smoothing=os.getenv('ATR_SMOOTHING', 'RMA'),
+            grid_spacing_pct=Decimal(os.getenv('GRID_SPACING_PCT', '0.002')),
             max_drawdown_pct=Decimal(os.getenv('MAX_DRAWDOWN_PCT', '0.15')),
-            min_margin_ratio=Decimal(os.getenv('MIN_MARGIN_RATIO', '0.2'))
+            min_margin_ratio=Decimal(os.getenv('MIN_MARGIN_RATIO', '0.2')),
+            is_single_mode=os.getenv('IS_SINGLE_MODE', 'false').lower() == 'true'
         )
     
     def validate_parameters(self) -> List[str]:

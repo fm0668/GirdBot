@@ -98,9 +98,10 @@ class SharedGridEngine:
         
         # 共享数据
         self.grid_data: Optional[SharedGridData] = None
+        self._latest_atr_result: Optional['ATRResult'] = None
         self._data_lock = asyncio.Lock()
         self._update_task: Optional[asyncio.Task] = None
-        
+
         # 更新控制
         self._update_interval = 60  # 秒
         self._force_update = False
@@ -108,34 +109,41 @@ class SharedGridEngine:
     
     async def initialize_grid_parameters(self) -> bool:
         """
-        初始化网格参数
-        
+        初始化网格参数 - 只在启动前执行一次
+        网格启动后不再重新计算，直到网格停止
+
         Returns:
             是否初始化成功
         """
         try:
-            self.logger.info("开始初始化网格参数")
-            
+            self.logger.info("开始初始化网格参数（仅启动前执行一次）")
+
             # 验证配置
             if not self.dual_config.validate_config():
                 raise GridParameterError("双账户配置无效")
-            
+
             errors = self.executor_config.validate_parameters()
             if errors:
                 raise GridParameterError(f"执行器配置无效: {', '.join(errors)}")
-            
-            # 首次计算网格参数
-            success = await self.update_grid_parameters()
-            if not success:
-                return False
-            
-            # 启动定时更新任务
+
+            # 只在未初始化或网格已停止时才计算参数
+            if self.grid_data is None or not self.grid_data.is_valid:
+                success = await self.update_grid_parameters()
+                if not success:
+                    return False
+                self.logger.info("网格参数计算完成，启动后将不再重新计算")
+            else:
+                self.logger.info("网格参数已存在，跳过重新计算")
+
+            # 不启动定时更新任务 - 网格启动后参数保持不变
             self._is_running = True
-            self._update_task = asyncio.create_task(self._periodic_update_loop())
-            
-            self.logger.info("网格参数初始化成功")
+
+            self.logger.info("网格参数初始化成功", extra={
+                'grid_count': len(self.grid_data.long_levels) if self.grid_data else 0,
+                'calculation_time': self.grid_data.last_update.isoformat() if self.grid_data else None
+            })
             return True
-            
+
         except Exception as e:
             self.logger.error(f"网格参数初始化失败: {e}")
             return False
@@ -164,7 +172,10 @@ class SharedGridEngine:
                     timeframe='1h',  # 使用1小时K线
                     config=atr_config
                 )
-                
+
+                # 保存ATR结果
+                self._latest_atr_result = atr_result
+
                 # 获取真实账户余额
                 account_balances = await self._get_real_account_balances()
 
@@ -177,13 +188,13 @@ class SharedGridEngine:
                     safety_factor=self.executor_config.safety_factor,
                     max_leverage=self.executor_config.leverage
                 )
-                
+
                 # 生成网格层级
                 long_levels, short_levels = await self.generate_grid_levels(grid_parameters)
-                
+
                 # 更新共享数据
                 sequence = 0 if self.grid_data is None else self.grid_data.update_sequence + 1
-                
+
                 self.grid_data = SharedGridData(
                     parameters=grid_parameters,
                     long_levels=long_levels,
@@ -262,9 +273,9 @@ class SharedGridEngine:
         if not self.grid_data or not self.grid_data.is_valid:
             return []
         
-        if account_type.upper() == 'LONG':
+        if account_type.upper() in ['LONG', 'SINGLE']:
             return self.grid_data.long_levels.copy()
-        elif account_type.upper() == 'SHORT':
+        elif account_type.upper() in ['SHORT', 'DUAL']:
             return self.grid_data.short_levels.copy()
         else:
             self.logger.warning(f"未知的账户类型: {account_type}")
@@ -283,13 +294,19 @@ class SharedGridEngine:
     
     async def generate_grid_levels(self, parameters: GridParameters) -> Tuple[List[GridLevel], List[GridLevel]]:
         """
-        生成网格层级
-        
+        生成共享网格层级
+
+        核心逻辑：
+        1. 多头和空头共享同一套网格价格点（相同的level_id和price）
+        2. 基于价格区间均匀分布网格点
+        3. 多头执行器在这些价格点挂买单，空头执行器挂卖单
+        4. 不是一次性挂满所有层级，而是根据策略逐步挂单
+
         Args:
             parameters: 网格参数
-        
+
         Returns:
-            (多头网格层级, 空头网格层级)
+            (多头网格层级, 空头网格层级): 共享相同价格点的网格层级
         """
         try:
             long_levels = []
@@ -309,25 +326,30 @@ class SharedGridEngine:
                 
                 # 确保价格在上下边界范围内
                 if level_price <= parameters.upper_bound and level_price >= parameters.lower_bound:
-                    # 创建多头网格层级（买入价格）
+                    # 创建共享网格层级 - 多头和空头使用相同的价格点和ID
+                    shared_level_id = f"GRID_{i}"  # 共享的层级ID
+
+                    # 多头网格层级（用于挂买单）
                     long_level = GridLevel(
-                        level_id=i,
+                        level_id=shared_level_id,  # 共享ID
                         price=level_price,
                         amount=parameters.amount_per_grid,
-                        side='LONG'
+                        side='LONG'  # 标识多头使用
                     )
                     long_levels.append(long_level)
-                    
-                    # 创建空头网格层级（卖出价格）- 使用相同价格点
+
+                    # 空头网格层级（用于挂卖单）- 相同价格点和ID
                     short_level = GridLevel(
-                        level_id=i,
+                        level_id=shared_level_id,  # 相同的共享ID
                         price=level_price,
                         amount=parameters.amount_per_grid,
-                        side='SHORT'
+                        side='SHORT'  # 标识空头使用
                     )
                     short_levels.append(short_level)
             
+            self.logger.info(f"生成共享网格层级: {len(long_levels)}个价格点, 多头和空头共享相同网格")
             self.logger.debug("网格层级生成完成", extra={
+                'shared_price_points': len(long_levels),
                 'long_levels_count': len(long_levels),
                 'short_levels_count': len(short_levels),
                 'price_range': str(price_range),
@@ -397,24 +419,12 @@ class SharedGridEngine:
         self._force_update = True
         return await self.update_grid_parameters()
     
+    # 删除定时更新循环 - 网格启动后参数保持不变
     async def _periodic_update_loop(self) -> None:
-        """定期更新循环"""
-        while self._is_running:
-            try:
-                await asyncio.sleep(self._update_interval)
-                
-                if self._force_update:
-                    self._force_update = False
-                    await self.update_grid_parameters()
-                else:
-                    # 检查是否需要更新
-                    if await self._should_update():
-                        await self.update_grid_parameters()
-                        
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                self.logger.error(f"定期更新循环出错: {e}")
+        """定期更新循环 - 已禁用，网格启动后参数不再更新"""
+        self.logger.info("定时更新循环已禁用，网格启动后参数保持不变")
+        # 不执行任何更新操作
+        pass
     
     async def _should_update(self) -> bool:
         """
@@ -467,17 +477,27 @@ class SharedGridEngine:
             }
         }
     
+    def get_latest_atr_result(self) -> Optional['ATRResult']:
+        """获取最新的ATR计算结果"""
+        return self._latest_atr_result
+
+    def get_current_parameters(self) -> Optional['GridParameters']:
+        """获取当前网格参数"""
+        if self.grid_data:
+            return self.grid_data.parameters
+        return None
+
     async def shutdown(self) -> None:
         """关闭网格引擎"""
         self.logger.info("开始关闭共享网格引擎")
-        
+
         self._is_running = False
-        
+
         if self._update_task and not self._update_task.done():
             self._update_task.cancel()
             try:
                 await self._update_task
             except asyncio.CancelledError:
                 pass
-        
+
         self.logger.info("共享网格引擎已关闭")
